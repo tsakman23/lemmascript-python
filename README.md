@@ -8,6 +8,14 @@ This is a **Tech Preview**: the core idea is there, but support, semantics, and 
 
 See our [blog post](https://midspiral.com/blog/lemmascript-a-verification-toolchain-for-typescript/).
 
+## Python frontend (fork)
+
+This fork adds a **Python frontend**. Fully type-annotated Python with `#@` contracts goes through the same engine and Dafny backend as TypeScript. `lsc check --backend=dafny foo.py` works like it does for a `.ts` file.
+
+The frontend models Python semantics, not JavaScript: `//` and `%` floor, ints are unbounded, and truthiness follows Python. A differential test runs the original Python against the compiled Dafny model to check that a proof carries over to the real code. Unsupported constructs are rejected with a located error. Status: **M1**: `int`/`bool` functions with `requires`/`ensures`. See [python/README.md](python/README.md) and [python/examples](python/examples).
+
+**Upstream compatibility:** Based on LemmaScript v0.6.4 (upstream commit `4b77a79`).
+
 ## Examples and Case Studies
 
 Each example and case study is verified in Lean 4 and/or Dafny from the same annotated TypeScript source.
