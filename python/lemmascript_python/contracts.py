@@ -45,6 +45,13 @@ def load_source(source: str, filename: str = "<string>") -> dict[str, FnContract
         req: list[str] = []
         ens: list[str] = []
         unevaluable = False
+        params = {n for n, _ in sig.params}
+        for a in heads:
+            # `#@ type p nat` on a parameter is a precondition in disguise: the
+            # Dafny parameter is a `nat`, so the proof covers only p >= 0.
+            words = a.text.split()
+            if a.keyword == "type" and len(words) == 2 and words[1] == "nat" and words[0] in params:
+                req.append(f"{words[0]} >= 0")
         for a in heads:
             if a.keyword not in ("requires", "ensures"):
                 continue

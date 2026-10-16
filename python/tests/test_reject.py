@@ -64,6 +64,7 @@ def test_rejects(src: str, message: str, line: int) -> None:
     ("def f(x: int) -> int:\n    #@ requires x >\n    return x\n", "invalid spec expression", 2),
     ("def f(x: int) -> int:\n    #@ requires x / 2 > 0\n    return x\n", "'/' produces a float", 2),
     ("#@ verify\ndef f(x: int) -> int:\n    return x\n", "'#@ verify' belongs inside a function body", 1),
+    ("def f(x: int) -> int:\n    #@ ensures forall(k: int, k * 0 == 0)\n    return x\n", "quantifiers are not supported yet", 2),
     ("def f(x: int) -> int:\n    return x\n\n#@ requires x > 0\n", "stray '#@' annotation", 4),
     ("#@ option no-such-option true\ndef f(x: int) -> int:\n    return x\n", "unknown option 'no-such-option'", 1),
     ("#@ option string-semantics javascript-utf16\ndef f(x: int) -> int:\n    return x\n",

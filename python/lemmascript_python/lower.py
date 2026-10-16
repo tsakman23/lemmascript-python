@@ -372,6 +372,8 @@ class FunctionLowerer:
         return isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant)
 
     def call(self, node: ast.Call) -> tuple[Raw, PyType]:
+        if self.in_spec and isinstance(node.func, ast.Name) and node.func.id in ("forall", "exists"):
+            raise _err("quantifiers are not supported yet", node)
         if node.keywords:
             raise _err("keyword arguments are not supported", node)
         if any(isinstance(a, ast.Starred) for a in node.args):
