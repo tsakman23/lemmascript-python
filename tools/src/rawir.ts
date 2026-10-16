@@ -61,6 +61,12 @@ export type RawExpr =
   // Havoc — nondeterministic value (from //@ havoc annotation):
   | { kind: "havoc"; tsType: string }
 
+/** A spec expression: `//@ ` annotation text parsed later by the
+ *  specparser, or — HOOK(external-frontend) — an expression already parsed by
+ *  a non-TypeScript frontend with its own spec grammar. Resolve treats both
+ *  identically after `parseSpec` (specparser.ts). */
+export type RawSpec = string | RawExpr;
+
 // ── Statements ───────────────────────────────────────────────
 
 export interface RawLet {
@@ -117,8 +123,8 @@ export interface RawIf {
 export interface RawWhile {
   kind: "while";
   cond: RawExpr;
-  invariants: string[];  decreases: string | null;
-  doneWith: string | null;
+  invariants: RawSpec[];  decreases: RawSpec | null;
+  doneWith: RawSpec | null;
   body: RawStmt[];
   line: number;
 }
@@ -137,7 +143,7 @@ export interface RawForOf {
   kind: "forof";
   names: string[];        // single name or destructured: [k, v, ...]
   iterable: RawExpr;
-  invariants: string[];  doneWith: string | null;
+  invariants: RawSpec[];  doneWith: RawSpec | null;
   body: RawStmt[];
   line: number;
 }
@@ -151,20 +157,20 @@ export interface RawGhostLet {
   kind: "ghostLet";
   name: string;
   tsType: string | null;   // explicit type annotation, or null to infer
-  init: string;            // spec expression string (parsed later)
+  init: RawSpec;           // spec expression (parsed later if a string)
   line: number;
 }
 
 export interface RawGhostAssign {
   kind: "ghostAssign";
   target: string;
-  value: string;           // spec expression string (parsed later)
+  value: RawSpec;          // spec expression (parsed later if a string)
   line: number;
 }
 
 export interface RawAssert {
   kind: "assert";
-  expr: string;              // spec expression string (parsed later)
+  expr: RawSpec;             // spec expression (parsed later if a string)
   line: number;
   assumed?: boolean;         // true when source was //@ assume — emitted as `assume`, not `assert`
 }
@@ -194,10 +200,10 @@ export interface RawFunction {
   tsParams: RawTsParam[]; // original TS signature grouping (params = flatten of this); see RawTsParam
 
   returnType: string;
-  requires: string[];     // //@ annotation strings
-  ensures: string[];
+  requires: RawSpec[];    // //@ annotation strings (or pre-parsed, see RawSpec)
+  ensures: RawSpec[];
   contract: string[];     // //@ contract — natural-language description of intent (NOT a spec; provers ignore it)
-  decreases: string | null;
+  decreases: RawSpec | null;
   pure: boolean;           // //@ pure — force pure even if syntactically impure
   autohavoc: boolean;      // //@ autohavoc — abstract unmodellable exprs to havoc (file-level or per-fn)
   typeAnnotations: { name: string; type: string }[];
@@ -231,8 +237,8 @@ export interface RawExtern {
   typeParams: string[];    // generic type parameters, e.g. ["S", "A"] (referenced by params/returnType)
   params: RawParam[];      // typed parameter list (names + TS type strings)
   returnType: string;      // TS type string
-  requires: string[];      // copied `//@ requires` annotation strings
-  ensures: string[];       // copied `//@ ensures` annotation strings
+  requires: RawSpec[];     // copied `//@ requires` annotations
+  ensures: RawSpec[];      // copied `//@ ensures` annotations
   impure: boolean;         // effective call-by-call nondeterminism (Dafny method)
 }
 

@@ -5,12 +5,12 @@
  * No mutation — each let extends the chain, lookup walks it.
  */
 
-import type { RawExpr, RawStmt, RawFunction, RawModule } from "./rawir.js";
+import type { RawExpr, RawStmt, RawFunction, RawModule, RawSpec } from "./rawir.js";
 import type { Ty, TExpr, TStmt, TFunction, TModule, TParam, CallKind } from "./typedir.js";
 import { isBigInt, tyEqual, isTerminatorKind } from "./typedir.js";
 import { parseTsType, tyToCanonical } from "./types.js";
 import type { TypeDeclInfo } from "./types.js";
-import { parseExpr } from "./specparser.js";
+import { parseSpec } from "./specparser.js";
 import { freshName } from "./names.js";
 import { recognizeBuiltin, builtinSpec } from "./builtins.js";
 import { declOf, declOfKind, declOfDotted, declOfTy, tyBaseName } from "./typedecls.js";
@@ -832,6 +832,9 @@ function resolveExpr(e: RawExpr, ctx: Ctx): TExpr {
         // division in JS (3n / 2n === 1n), so keep it integer.
         ty = (isBigInt(left.ty) || isBigInt(right.ty)) ? { kind: "int", big: true } : { kind: "real" };
       }
+      // HOOK(external-frontend): floored integer division/modulo (Python `//`, `%`).
+      // Always `int`: `nat` operands can yield a negative result (`3 % -2 === -1`).
+      else if (e.op === "floordiv" || e.op === "floormod") ty = { kind: "int" };
       else if (["+", "-", "*", "%"].includes(e.op)) {
         ty = (left.ty.kind === "real" || right.ty.kind === "real") ? { kind: "real" } : left.ty;
       }
@@ -1283,14 +1286,14 @@ function resolveExpr(e: RawExpr, ctx: Ctx): TExpr {
 
 // ── Resolve specs ────────────────────────────────────────────
 
-function resolveSpec(spec: string, ctx: Ctx): TExpr {
-  return resolveExpr(parseExpr(spec), ctx);
+function resolveSpec(spec: RawSpec, ctx: Ctx): TExpr {
+  return resolveExpr(parseSpec(spec), ctx);
 }
 
-function resolveSpecs(specs: string[], ctx: Ctx): TExpr[] {
+function resolveSpecs(specs: RawSpec[], ctx: Ctx): TExpr[] {
   const result: TExpr[] = [];
   for (const spec of specs) {
-    for (const clause of splitConj(parseExpr(spec))) {
+    for (const clause of splitConj(parseSpec(spec))) {
       result.push(resolveExpr(clause, ctx));
     }
   }
@@ -1518,23 +1521,23 @@ function resolveStmt(s: RawStmt, ctx: Ctx): [TStmt, Env | null] {
     case "ghostLet": {
       const specCtx = { ...ctx, inSpec: true };
       // Handle new Set<T>() / new Map<K,V>() constructors
-      const collMatch = s.init.match(/^new\s+(Set|Map)<(.+)>\(\)$/);
+      const collMatch = typeof s.init === "string" ? s.init.match(/^new\s+(Set|Map)<(.+)>\(\)$/) : null;
       const init = collMatch
         ? resolveExpr({ kind: "emptyCollection", collectionType: collMatch[1] as "Set" | "Map", tsType: `${collMatch[1]}<${collMatch[2]}>` }, specCtx)
-        : resolveExpr(parseExpr(s.init), specCtx);
+        : resolveExpr(parseSpec(s.init), specCtx);
       const ty = s.tsType ? parseTsType(s.tsType) : init.ty;
       return [{ kind: "ghostLet", name: s.name, ty, init }, extend(ctx.env, s.name, ty)];
     }
 
     case "ghostAssign": {
       const specCtx = { ...ctx, inSpec: true };
-      const value = resolveExpr(parseExpr(s.value), specCtx);
+      const value = resolveExpr(parseSpec(s.value), specCtx);
       return [{ kind: "ghostAssign", target: s.target, value }, ctx.env];
     }
 
     case "assert": {
       const specCtx = { ...ctx, inSpec: true };
-      const expr = resolveExpr(parseExpr(s.expr), specCtx);
+      const expr = resolveExpr(parseSpec(s.expr), specCtx);
       return [{ kind: "assert", expr, assumed: s.assumed }, ctx.env];
     }
   }

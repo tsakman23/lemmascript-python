@@ -682,6 +682,13 @@ function lowerExpr(e: TExpr, binds: Stmt[] | null): Expr {
         };
         return { kind: "binop", op: "arrayConcat", left: strify(e.left), right: strify(e.right) };
       }
+      // HOOK(external-frontend): floored division and modulo — the quotient rounds
+      // toward -inf and the remainder takes the divisor's sign (Python `//`, `%`).
+      // Dafny's native `/`, `%` are Euclidean and differ when the divisor is negative.
+      if (e.op === "floordiv" || e.op === "floormod") {
+        if (_opts.backend !== "dafny") throw new Error(`'${e.op}' is not yet supported on the ${_opts.backend} backend`);
+        return { kind: "app", fn: e.op === "floordiv" ? "JSFloorDiv" : "FloorMod", args: [lowerExpr(e.left, binds), lowerExpr(e.right, binds)] };
+      }
       // JS `%` is truncated (sign of the dividend); a signed `int` differs from the
       // Euclidean `%` of Dafny/Lean, so route it through JSRem (Lean: `Int.tmod`).
       if (e.op === "%" && e.left.ty.kind === "int") {

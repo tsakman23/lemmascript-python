@@ -8,7 +8,7 @@
 import { Project, Node, FunctionDeclaration, InterfaceDeclaration, SourceFile, TypeAliasDeclaration, Type, SyntaxKind, Expression, ElementAccessExpression, ScriptTarget, VariableDeclaration, ts } from "ts-morph";
 import type { TypeDeclInfo, VariantInfo } from "./types.js";
 import { initTypeParser } from "./types.js";
-import type { RawExpr, RawStmt, RawFunction, RawModule, RawClass, RawConst, RawGhostLet, RawGhostAssign } from "./rawir.js";
+import type { RawExpr, RawStmt, RawFunction, RawModule, RawClass, RawConst, RawGhostLet, RawGhostAssign, RawSpec } from "./rawir.js";
 import { normalizeBigIntLiteral } from "./rawir.js";
 import { setUserNames, freshName } from "./names.js";
 import { DEFAULT_OPTIONS, type LscOptions } from "./config.js";
@@ -1287,7 +1287,8 @@ function renameRawExpr(e: RawExpr, from: string, to: string): RawExpr {
  *  renaming once a `let from` re-declares the name (it shadows). */
 function renameRawStmt(s: RawStmt, from: string, to: string): RawStmt {
   const r = (x: RawExpr) => renameRawExpr(x, from, to);
-  const sp = (x: string) => renameSpec(x, from, to);
+  // Specs produced by this extractor are always annotation text.
+  const sp = (x: RawSpec) => renameSpec(x as string, from, to);
   switch (s.kind) {
     case "let": return { ...s, init: r(s.init) };  // name kept: a shadowing binding is a different variable
     case "assign": return { ...s, target: s.target === from ? to : s.target, value: r(s.value) };
@@ -2530,7 +2531,7 @@ export function extractModule(sourceFile: SourceFile, options: LscOptions = DEFA
       collectNames(fn.body);
       // Also scan spec annotations for identifier references
       for (const spec of [...fn.requires, ...fn.ensures]) {
-        for (const m of spec.matchAll(/\b([a-zA-Z_]\w*)\b/g)) {
+        for (const m of (spec as string).matchAll(/\b([a-zA-Z_]\w*)\b/g)) {
           referencedNames.add(m[1]);
         }
       }

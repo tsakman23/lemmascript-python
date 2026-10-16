@@ -22,6 +22,8 @@ import { dafnyGen, dafnyCheckDiff, dafnyVerify, dafnyRegen } from "./dafny-comma
 import { leanGen, leanCheck } from "./lean-commands.js";
 import { runInfo, runTypedInfo, type TypedInfoDafny } from "./info-command.js";
 import { RunLog, resolveLogDir, runLogEnabled } from "./run-log.js";
+import { isExternalSource, loadExternalSource, sourceBase, type FrontendResult } from "./frontend.js";
+import { setUserNames } from "./names.js";
 import { runRuns } from "./runs-command.js";
 import {
   findUp,
@@ -29,6 +31,7 @@ import {
   parseFileOptions,
   resolveDafnyArtifactDir,
   resolveOptions,
+  loadFrontends,
   type LscOptions,
 } from "./config.js";
 
@@ -337,42 +340,24 @@ function runFile(
     process.exit(1);
   }
 
-  // Find nearest tsconfig.json for import resolution; fall back to bare options
-  const tsConfigFilePath = findUp("tsconfig.json", absPath) ?? undefined;
-  const project = tsConfigFilePath
-    ? new Project({ tsConfigFilePath })
-    : new Project({ compilerOptions: { strict: true, target: ScriptTarget.ESNext, lib: ["lib.esnext.d.ts"] } });
-  const sourceFile = project.addSourceFileAtPath(absPath);
-  project.resolveSourceFileDependencies();
-
-  const fullText = sourceFile.getFullText();
-  const { options, configFile } = effectiveOptions(absPath, fullText, configPath);
+  // Frontend: source → Raw IR plus the file-level directives. TypeScript is
+  // built in; HOOK(external-frontend) — any other source arrives as a Raw IR
+  // envelope (frontend.ts), and from here on the pipeline is identical.
+  const front = isExternalSource(absPath)
+    ? loadExternal(absPath, configPath)
+    : extractTypeScript(absPath, configPath);
+  const { raw, options, configFile, displayName } = front;
+  const backendDirective = front.backend;
+  const leanModuleOverride = front.leanModule;
   // Checked here, for every command, so a bad LSC_RUN_LOG fails like a bad config value.
   const runLogOn = runLogEnabled(options["run-log"], process.env.LSC_RUN_LOG);
 
   // Check //@ backend directive — skip if backend doesn't match.
   // `extract` and `info` are backend-neutral and always run.
-  const backendDirective = fullText.match(/\/\/@ backend (\w+)/);
-  if (cmd !== "extract" && cmd !== "info" && backendDirective && backendDirective[1] !== backend) {
-    console.log(`Skipped: ${path.basename(filePath)} (//@ backend ${backendDirective[1]}, current: ${backend})`);
+  if (cmd !== "extract" && cmd !== "info" && backendDirective && backendDirective !== backend) {
+    console.log(`Skipped: ${path.basename(filePath)} (//@ backend ${backendDirective}, current: ${backend})`);
     return;
   }
-
-  // `//@ lean-module <name>` overrides the Lean module base (default: file
-  // basename). Lean module names are flat/global, so two identically-named
-  // `.ts` files (e.g. an in-place fork's duplicated `compaction.ts`) would emit
-  // colliding `foo.types`/`foo.def` modules; this gives one a distinct base so
-  // both can be separate Lean libraries. Lean-only — Dafny is unaffected.
-  const leanModuleDirective = fullText.match(/\/\/@ lean-module ([A-Za-z0-9_.\-]+)/);
-  const leanModuleOverride = leanModuleDirective ? leanModuleDirective[1] : undefined;
-
-  // Validate the actual dependency graph, not unrelated files in the tsconfig.
-  // Library selection may differ; only the string model changes contract meaning.
-  const validateDependency = stringModelValidator(sourceFile, options, configPath);
-  validateDependency(sourceFile);
-
-  // Extract: ts-morph → Raw IR
-  const raw = extractModule(sourceFile, options, validateDependency);
 
   if (cmd === "extract") {
     console.log(JSON.stringify(raw, null, 2));
@@ -380,7 +365,7 @@ function runFile(
   }
 
   if (cmd === "info" && !typedInfo) {
-    const outPath = path.join(path.dirname(absPath), `${path.basename(filePath, ".ts")}.ts.json`);
+    const outPath = path.join(path.dirname(absPath), `${displayName}.json`);
     runInfo(raw, outPath);
     return;
   }
@@ -404,17 +389,17 @@ function runFile(
       if (typesFile) typesFile = peepholeModule(typesFile, "dafny");
       defFile = peepholeModule(defFile, "dafny");
       const merged = { ...defFile, decls: [...(typesFile?.decls ?? []), ...defFile.decls] };
-      emitDafnyFile(merged, path.basename(filePath), options);
+      emitDafnyFile(merged, displayName, options);
       dafnyInfo = { emittedNames: Object.fromEntries(emittedNameMap()) };
     } catch (err) {
       dafnyInfo = { error: err instanceof Error ? err.message : String(err) };
     }
-    runTypedInfo(raw, typed, lscVersion(), backendDirective ? backendDirective[1] : null, options, dafnyInfo);
+    runTypedInfo(raw, typed, lscVersion(), backendDirective, options, dafnyInfo);
     return;
   }
 
   const dir = path.dirname(absPath);
-  const base = path.basename(filePath, ".ts");
+  const base = sourceBase(filePath);
 
   // ── Dafny backend ─────────────────────────────────────────
   if (backend === "dafny") {
@@ -423,7 +408,7 @@ function runFile(
     defFile = peepholeModule(defFile, "dafny");
     const allDecls = [...(typesFile?.decls ?? []), ...defFile.decls];
     const merged = { ...defFile, decls: allDecls };
-    const text = emitDafnyFile(merged, path.basename(filePath), options);
+    const text = emitDafnyFile(merged, displayName, options);
     const artifactDir = resolveDafnyArtifactDir(absPath, configFile, options);
     const genPath = path.join(artifactDir, `${base}.dfy.gen`);
     const dfyPath = path.join(artifactDir, `${base}.dfy`);
@@ -485,6 +470,66 @@ function runFile(
   }
   console.error(`Unknown command: ${cmd}`);
   process.exit(1);
+}
+
+interface LoadedSource {
+  raw: ReturnType<typeof extractModule>;
+  options: LscOptions;
+  configFile: string | null;
+  backend: string | null;
+  leanModule: string | undefined;
+  displayName: string;
+}
+
+/** The built-in TypeScript frontend: ts-morph extraction plus `//@ ` directives. */
+function extractTypeScript(absPath: string, configPath?: string): LoadedSource {
+  // Find nearest tsconfig.json for import resolution; fall back to bare options
+  const tsConfigFilePath = findUp("tsconfig.json", absPath) ?? undefined;
+  const project = tsConfigFilePath
+    ? new Project({ tsConfigFilePath })
+    : new Project({ compilerOptions: { strict: true, target: ScriptTarget.ESNext, lib: ["lib.esnext.d.ts"] } });
+  const sourceFile = project.addSourceFileAtPath(absPath);
+  project.resolveSourceFileDependencies();
+
+  const fullText = sourceFile.getFullText();
+  const { options, configFile } = effectiveOptions(absPath, fullText, configPath);
+
+  // `//@ lean-module <name>` overrides the Lean module base (default: file
+  // basename). Lean module names are flat/global, so two identically-named
+  // `.ts` files (e.g. an in-place fork's duplicated `compaction.ts`) would emit
+  // colliding `foo.types`/`foo.def` modules; this gives one a distinct base so
+  // both can be separate Lean libraries. Lean-only — Dafny is unaffected.
+  const leanModuleDirective = fullText.match(/\/\/@ lean-module ([A-Za-z0-9_.\-]+)/);
+  const leanModuleOverride = leanModuleDirective ? leanModuleDirective[1] : undefined;
+
+  // Validate the actual dependency graph, not unrelated files in the tsconfig.
+  // Library selection may differ; only the string model changes contract meaning.
+  const validateDependency = stringModelValidator(sourceFile, options, configPath);
+  validateDependency(sourceFile);
+
+  // Extract: ts-morph → Raw IR
+  const raw = extractModule(sourceFile, options, validateDependency);
+  const backendMatch = fullText.match(/\/\/@ backend (\w+)/);
+  return {
+    raw, options, configFile,
+    backend: backendMatch ? backendMatch[1] : null,
+    leanModule: leanModuleOverride,
+    displayName: path.basename(absPath),
+  };
+}
+
+/** HOOK(external-frontend): a Raw IR envelope, read directly or from a
+ *  configured frontend command. Its directives layer over lemmascript.json
+ *  exactly like `//@ option` lines do for a TypeScript source. */
+function loadExternal(absPath: string, configPath?: string): LoadedSource {
+  const loaded = loadConfigOptions(absPath, configPath);
+  const front: FrontendResult = loadExternalSource(absPath, loadFrontends(loaded.configFile));
+  setUserNames(front.identifiers);
+  const options = resolveOptions({ ...loaded.explicit, ...front.fileOptions }, absPath);
+  return {
+    raw: front.raw, options, configFile: loaded.configFile,
+    backend: front.backend, leanModule: front.leanModule, displayName: front.displayName,
+  };
 }
 
 try {

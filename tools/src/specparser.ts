@@ -3,7 +3,7 @@
  * Parses //@ annotation expressions into RawExpr AST nodes.
  */
 
-import type { RawExpr } from "./rawir.js";
+import type { RawExpr, RawSpec } from "./rawir.js";
 import { normalizeBigIntLiteral } from "./rawir.js";
 
 export type Expr = RawExpr;
@@ -335,4 +335,10 @@ class Parser {
 
 export function parseExpr(input: string): Expr {
   return new Parser(tokenize(input)).parse();
+}
+
+/** HOOK(external-frontend): a spec is either annotation text (parsed here) or
+ *  an expression a non-TypeScript frontend already parsed with its own grammar. */
+export function parseSpec(spec: RawSpec): Expr {
+  return typeof spec === "string" ? parseExpr(spec) : spec;
 }

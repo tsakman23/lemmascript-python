@@ -108,7 +108,7 @@ export function validateOptions(raw: unknown, source: string): ExplicitOptions {
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === "$schema") continue;
+    if (key === "$schema" || key === "frontends") continue;  // frontends: see loadFrontends
     if (!isKnownKey(key)) {
       fail(source, `unknown option '${key}' (known options: ${KNOWN_KEYS.join(", ")})`);
     }
@@ -271,6 +271,31 @@ export function loadConfigOptions(
   const explicit = validateOptions(parsed, configFile);
   CONFIG_CACHE.set(configFile, explicit);
   return { explicit: { ...explicit }, configFile };
+}
+
+/** HOOK(external-frontend): the `frontends` key of a lemmascript.json — file
+ *  extension (with the dot) → command argv that prints a Raw IR envelope for
+ *  the source path appended to it (see frontend.ts). */
+export function loadFrontends(configFile: string | null): Record<string, string[]> {
+  if (!configFile || !existsSync(configFile)) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configFile, "utf8"));
+  } catch {
+    return {};  // loadConfigOptions reports invalid JSON
+  }
+  const raw = (parsed as Record<string, unknown> | null)?.frontends;
+  if (raw === undefined) return {};
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) fail(configFile, "'frontends' must be an object mapping extensions to commands");
+  const out: Record<string, string[]> = {};
+  for (const [ext, argv] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^\.[A-Za-z0-9]+$/.test(ext)) fail(configFile, `frontends: '${ext}' is not a file extension like ".py"`);
+    if (!Array.isArray(argv) || argv.length === 0 || !argv.every(a => typeof a === "string")) {
+      fail(configFile, `frontends: '${ext}' must be a non-empty array of strings (the command and its arguments)`);
+    }
+    out[ext] = argv as string[];
+  }
+  return out;
 }
 
 /** Resolve the directory containing one source file's Dafny companions. */

@@ -11,16 +11,16 @@
  */
 
 import { writeFileSync } from "fs";
-import type { RawFunction, RawModule } from "./rawir.js";
+import type { RawFunction, RawModule, RawSpec } from "./rawir.js";
 import type { TFunction, TModule } from "./typedir.js";
 import { parseTsType, tyToCanonical } from "./types.js";
 import type { LscOptions } from "./config.js";
 
 interface FnInfo {
   sig: string;
-  requires: string[];
-  ensures: string[];
-  decreases: string | null;
+  requires: RawSpec[];
+  ensures: RawSpec[];
+  decreases: RawSpec | null;
 }
 
 function renderSig(fn: RawFunction): string {
