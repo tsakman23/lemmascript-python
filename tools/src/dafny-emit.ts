@@ -591,7 +591,7 @@ function emitExpr(e: Expr): string {
       if (e.fn === "SetLiteral") return `{${args.join(", ")}}`;
       if (e.fn === "JSFloorDiv") needPreamble("JSFloorDiv");
       if (e.fn === "JSRem") needPreamble("JSRem");
-      if (e.fn === "FloorMod") needPreamble("FloorMod");
+      if (e.fn === "FloorDiv" || e.fn === "FloorMod") needPreamble("FloorDivMod");
       if (e.fn === "JSTruncDiv") needPreamble("JSTruncDiv");
       if (e.fn === "JSStringLt") needPreamble("JSStringLt");
       if (e.fn === "CeilReal") needPreamble("CeilReal");
@@ -1046,16 +1046,23 @@ const JS_REM = `function JSRem(a: int, b: int): int
   if a < 0 then -r else r
 }`;
 
-// HOOK(external-frontend): floored modulo — the result takes the divisor's sign,
-// pairing with JSFloorDiv so that a == b * JSFloorDiv(a, b) + FloorMod(a, b).
-// Dafny's % is Euclidean (always >= 0); the two agree whenever b > 0.
-const FLOOR_MOD = `function FloorMod(a: int, b: int): int
+// HOOK(external-frontend): floored division and modulo — the quotient rounds
+// toward -inf and the remainder takes the divisor's sign. Defined from Dafny's
+// Euclidean / and % (which agree with them whenever b > 0) so the pair keeps
+// the division identity linear: a == b * FloorDiv(a, b) + FloorMod(a, b).
+const FLOOR_DIV_MOD = `function FloorDiv(a: int, b: int): int
+  requires b != 0
+{
+  if b < 0 && a % b != 0 then a / b - 1 else a / b
+}
+
+function FloorMod(a: int, b: int): int
   requires b != 0
   ensures b > 0 ==> 0 <= FloorMod(a, b) < b
   ensures b < 0 ==> b < FloorMod(a, b) <= 0
+  ensures a == b * FloorDiv(a, b) + FloorMod(a, b)
 {
-  var r := a % b;
-  if r != 0 && b < 0 then r + b else r
+  if b < 0 && a % b != 0 then a % b + b else a % b
 }`;
 
 const JS_TRUNC_DIV = `function JSTruncDiv(a: int, b: int): int
@@ -1492,7 +1499,7 @@ const PREAMBLE_CODE: [string, string | (() => string)][] = [
   ["BitOr", BIT_OR],
   ["JSFloorDiv", JS_FLOOR_DIV],
   ["JSRem", JS_REM],
-  ["FloorMod", FLOOR_MOD],
+  ["FloorDivMod", FLOOR_DIV_MOD],
   ["JSTruncDiv", JS_TRUNC_DIV],
   ["JSStringLt", JS_STRING_LT],
   ["CeilReal", CEIL_REAL],

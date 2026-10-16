@@ -687,7 +687,7 @@ function lowerExpr(e: TExpr, binds: Stmt[] | null): Expr {
       // Dafny's native `/`, `%` are Euclidean and differ when the divisor is negative.
       if (e.op === "floordiv" || e.op === "floormod") {
         if (_opts.backend !== "dafny") throw new Error(`'${e.op}' is not yet supported on the ${_opts.backend} backend`);
-        return { kind: "app", fn: e.op === "floordiv" ? "JSFloorDiv" : "FloorMod", args: [lowerExpr(e.left, binds), lowerExpr(e.right, binds)] };
+        return { kind: "app", fn: e.op === "floordiv" ? "FloorDiv" : "FloorMod", args: [lowerExpr(e.left, binds), lowerExpr(e.right, binds)] };
       }
       // JS `%` is truncated (sign of the dividend); a signed `int` differs from the
       // Euclidean `%` of Dafny/Lean, so route it through JSRem (Lean: `Int.tmod`).
