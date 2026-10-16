@@ -42,7 +42,9 @@ def load_source(source: str, filename: str = "<string>") -> dict[str, FnContract
             continue
         sig = mod.signature(node)
         heads = [a for a in mod.annotations if a.claimed and node.lineno < a.line <= (node.end_lineno or node.lineno)]
-        req, ens, unevaluable = [], [], False
+        req: list[str] = []
+        ens: list[str] = []
+        unevaluable = False
         for a in heads:
             if a.keyword not in ("requires", "ensures"):
                 continue

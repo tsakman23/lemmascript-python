@@ -1,0 +1,103 @@
+name: Python frontend
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+
+env:
+  LSC_RUN_LOG: 'false'
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  python-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install
+        run: pip install -e 'python[test]'
+      - name: Typecheck frontend and examples (mypy --strict)
+        working-directory: python
+        run: |
+          mypy --strict lemmascript_python
+          mypy --strict examples/*.py tests/golden/*.py
+      - name: Unit tests
+        working-directory: python
+        run: pytest -m 'not lsc and not dafny' -q
+
+  python-golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install
+        run: |
+          npm ci
+          (cd tools && npm ci)
+          pip install -e 'python[test]'
+      - name: Engine hook tests
+        run: npx tsx --test tools/tests/external-frontend.test.ts
+      - name: Golden .dfy.gen tests
+        working-directory: python
+        run: pytest -m 'lsc and not dafny' -q
+      - name: Committed generated files are up to date
+        working-directory: python
+        run: |
+          npx tsx ../tools/src/lsc.ts gen --backend=dafny
+          git diff --exit-code
+          untracked=$(git ls-files --others --exclude-standard -- '*.dfy.gen' '*.dfy')
+          if [ -n "$untracked" ]; then
+            echo "ERROR: untracked generated Dafny files:"; echo "$untracked"; exit 1
+          fi
+
+  python-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: ./.github/actions/setup-dafny
+      - name: Install
+        run: |
+          npm ci
+          (cd tools && npm ci)
+          pip install -e 'python[test]'
+      - name: lsc check over python/LemmaScript-files.txt
+        working-directory: python
+        run: npx tsx ../tools/src/lsc.ts check --backend=dafny
+      - name: Golden fixtures verify
+        working-directory: python
+        run: pytest tests/test_verify.py -q
+
+  python-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: ./.github/actions/setup-dafny
+      - name: Install
+        run: |
+          npm ci
+          (cd tools && npm ci)
+          pip install -e 'python[test]'
+      - name: Differential tests (Python vs compiled Dafny model)
+        working-directory: python
+        run: pytest tests/test_differential.py -q

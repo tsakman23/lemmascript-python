@@ -198,10 +198,14 @@ def parse(text: str, line: int) -> ast.expr:
         raise UnsupportedError(f"invalid spec expression '{text}'", line) from None
     # Report locations at the annotation's line.
     for node in ast.walk(tree):
-        if hasattr(node, "lineno"):
+        if isinstance(node, (ast.expr, ast.stmt)):
             node.lineno = line
             node.end_lineno = line
     return tree.body
+
+
+def _as_bool(e: ast.expr) -> ast.expr:
+    return ast.Call(ast.Name("bool", ast.Load()), [e], [])
 
 
 class _ToPython(ast.NodeTransformer):
@@ -212,8 +216,7 @@ class _ToPython(ast.NodeTransformer):
             return ast.BoolOp(ast.Or(), [ast.UnaryOp(ast.Not(), a), b])
         if isinstance(node.func, ast.Name) and node.func.id == IFF:
             a, b = node.args
-            bool_ = lambda e: ast.Call(ast.Name("bool", ast.Load()), [e], [])  # noqa: E731
-            return ast.Compare(bool_(node.args[0]), [ast.Eq()], [bool_(node.args[1])])
+            return ast.Compare(_as_bool(a), [ast.Eq()], [_as_bool(b)])
         return node
 
 
@@ -224,5 +227,5 @@ def to_python(tree: ast.expr) -> str:
     values. Quantifiers are left as calls; the harness rejects unbounded ones.
     """
     import copy
-    out = _ToPython().visit(copy.deepcopy(tree))
+    out: ast.AST = _ToPython().visit(copy.deepcopy(tree))
     return ast.unparse(ast.fix_missing_locations(out))
