@@ -11,6 +11,11 @@ Two Dafny programs are compiled to Python with ``dafny translate py
   ``lsc_pre_<f>`` function per checked function whose body is the conjunction
   of ``f``'s Python ``requires``. Calling it runs the *Dafny* reading of the
   precondition, so the harness can compare it with the Python reading.
+  Quantifiers are spec-only (a function body cannot hold ``forall``), so a
+  function whose ``requires`` quantifies gets no ``lsc_pre_<f>``; its
+  precondition agreement is not checked. If the synthetic module does not
+  build at all, it is rebuilt without any ``lsc_pre_<f>`` and every function's
+  agreement check is skipped (``Built.pre_error`` says why).
 
 Every untranslated Dafny program is module ``module_``, so each program is
 wrapped in a module named after the content hash (``LscModel<key>``,
@@ -21,6 +26,7 @@ texts and the Dafny version.
 """
 from __future__ import annotations
 
+import ast
 import builtins
 import functools
 import hashlib
@@ -42,11 +48,13 @@ from types import ModuleType
 from typing import Any
 
 from lemmascript_python import contracts as contracts_mod
+from lemmascript_python import specs
 from lemmascript_python.contracts import FnContract
-from lemmascript_python.difftest.strategies import SUPPORTED_KINDS
+from lemmascript_python.difftest.specs_eval import has_quantifier
+from lemmascript_python.difftest.strategies import supported
 
 #: Bump when the wrapping or the synthetic module changes shape.
-FORMAT_VERSION = "1"
+FORMAT_VERSION = "3"
 PRE_PREFIX = "lsc_pre_"
 _VERIFY = re.compile(r"^\s*#@\s*verify\b")
 
@@ -145,8 +153,17 @@ def resolve(cls: object, dafny_name: str) -> Callable[..., Any] | None:
 # --- the synthetic precondition module --------------------------------------
 
 
+def requires_quantified(c: FnContract) -> bool:
+    """Whether ``c``'s requires use ``forall`` / ``exists`` (no executable Dafny reading)."""
+    if c.requires_src or c.ensures_src:  # the source texts are there: look
+        return any(has_quantifier(specs.parse(t, ln)) for t, ln in c.requires_src)
+    if c.unevaluable:  # cannot tell which clause quantifies: assume requires does
+        return True
+    return any(has_quantifier(ast.parse(r, mode="eval")) for r in c.requires)
+
+
 def pre_eligible(c: FnContract) -> bool:
-    return not c.unevaluable and all(k in SUPPORTED_KINDS for _, k in c.params)
+    return all(supported(k) for _, k in c.params) and not requires_quantified(c)
 
 
 def pre_source(source: str, cons: Mapping[str, FnContract]) -> str:
@@ -157,7 +174,9 @@ def pre_source(source: str, cons: Mapping[str, FnContract]) -> str:
         if not pre_eligible(c):
             continue
         params = ", ".join(f"{n}: {k}" for n, k in c.params)
-        body = " and ".join(f"({r})" for r in c.requires) or "True"
+        # bool(...): a spec may be truthy rather than bool (`requires x` on an
+        # int, `x ==> y` as `not x or y`), which body code cannot lower as is.
+        body = " and ".join(f"bool({r})" for r in c.requires) or "True"
         parts.append("")
         parts.append(f"def {PRE_PREFIX}{c.name}({params}) -> bool:")
         if verify_mode:
@@ -166,8 +185,15 @@ def pre_source(source: str, cons: Mapping[str, FnContract]) -> str:
     return "\n".join(parts) + "\n"
 
 
+_IMPORTS_STD = re.compile(r"^\s*import\s+(opened\s+)?Std\s*$", re.M)
+
+
 def wrap(module: str, text: str) -> str:
-    return f"module {module} {{\n{text}\n}}\n"
+    """``text`` as module ``module``. Generated code may name the standard
+    library (``Std.Collections.Seq.Filter``) as top-level code can; inside a
+    module that needs an ``import Std``."""
+    imp = "import Std\n" if "Std." in text and not _IMPORTS_STD.search(text) else ""
+    return f"module {module} {{\n{imp}{text}\n}}\n"
 
 
 # --- build --------------------------------------------------------------------
@@ -184,6 +210,9 @@ class Built:
     pre_module: ModuleType
     #: Python source name → Dafny name, from ``lsc info --typed``.
     emitted: dict[str, str] = field(default_factory=dict)
+    #: Why the synthetic precondition module was built without any
+    #: ``lsc_pre_<f>`` (None when it built as intended).
+    pre_error: str | None = None
 
     def dafny_name(self, py_name: str) -> str:
         return self.emitted.get(py_name, py_name)
@@ -263,17 +292,31 @@ def build(path: str | Path, *, cache_dir: Path | None = None,
     if cons is None:
         cons = contracts_mod.load(src)
     version = dafny_version()
+    pre_error: str | None = None
     with tempfile.TemporaryDirectory(prefix="lsc-difftest-") as tmp:
         work = Path(tmp)
         pre_dir = work / "pre"
         pre_dir.mkdir()
-        (pre_dir / src.name).write_text(pre_source(source, cons), encoding="utf-8")
+        synthetic = pre_source(source, cons)
+        (pre_dir / src.name).write_text(synthetic, encoding="utf-8")
         # Three independent lsc runs (~1s each, mostly start-up): run them together.
         with ThreadPoolExecutor(max_workers=3) as pool:
             config_f = pool.submit(run_lsc, ["config", str(src)], src.parent)
             gen_f = pool.submit(run_lsc, ["gen", "--backend=dafny", src.name], pre_dir)
             info_f = pool.submit(run_lsc, ["info", "--typed", src.name], pre_dir)
-            config_json, _, info_json = config_f.result(), gen_f.result(), info_f.result()
+            config_json = config_f.result()
+            try:
+                gen_f.result()
+                info_json = info_f.result()
+            except BuildError as e:
+                if synthetic == pre_source(source, {}):
+                    raise  # the source itself does not build
+                # A requires the frontend accepts in a spec but not in a body:
+                # fall back to the source alone (it must build by itself).
+                pre_error = "synthetic precondition module failed to build: " + str(e).splitlines()[-1]
+                (pre_dir / src.name).write_text(pre_source(source, {}), encoding="utf-8")
+                run_lsc(["gen", "--backend=dafny", src.name], pre_dir)
+                info_json = run_lsc(["info", "--typed", src.name], pre_dir)
         pre_text = (pre_dir / f"{src.stem}.dfy.gen").read_text(encoding="utf-8")
         found = _artifact_model(config_json, src)
         model_source: Path | None
@@ -297,4 +340,4 @@ def build(path: str | Path, *, cache_dir: Path | None = None,
     out_dir = entry / "out-py"
     return Built(key=key, source=src, model_source=model_source, out_dir=out_dir,
                  model_module=_import(out_dir, model_name), pre_module=_import(out_dir, pre_name),
-                 emitted=emitted)
+                 emitted=emitted, pre_error=pre_error)

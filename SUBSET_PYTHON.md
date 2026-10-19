@@ -42,8 +42,8 @@ A differential harness backs this up. It runs the original Python against the co
 | `int` | unbounded integer: Python ints never overflow, so this is exact | `number` (unbounded only by assumption) / `bigint` | ✅ |
 | `bool` | `bool`. Mixing it with `int` arithmetic or `==` (`True + 1`, `1 == True`) is rejected | `boolean` | ✅ |
 | `#@ type n nat` | non-negative integer. On a parameter it is a precondition (`n >= 0`) | `//@ type n nat` | ✅ |
-| `list[T]` | sequence, with value semantics under the aliasing rule below | `T[]` | 🚧 M2 |
-| `tuple[A, B]` | tuple (fixed arity) | `[A, B]` | 🚧 M2 |
+| `list[T]` | sequence, with value semantics under the aliasing rule below | `T[]` | ✅ |
+| `tuple[A, B]` | tuple (fixed arity) | `[A, B]` | 🚧 M3 |
 | `@dataclass(frozen=True)`, `NamedTuple`, `TypedDict` | record datatype | `type R = { … }` | 🚧 M3 |
 | `Literal["a", "b"]`, `Enum` | enum datatype | string-literal union | 🚧 M3 |
 | union of frozen dataclasses | sum datatype, dispatched by class | discriminated union | 🚧 M3 |
@@ -65,15 +65,15 @@ A differential harness backs this up. It runs the original Python against the co
 | `abs`, `min`, `max`, `bool(x)`, `int(x)` on int | exact | `Math.abs/min/max` | ✅ |
 | `a / b` | — | `/` (real division) | ❌ (produces a float; use `//`) |
 | `is`, `is not` | only against `None` | `=== undefined` | 🚧 M3 |
-| `in`, `not in` | membership | `.includes`, `.has`, `in` | 🚧 M2/M4 |
-| `xs[i]`, negative `i` | index from the end; out of range must be proven impossible | `xs[i]` (no negative index) | 🚧 M2/M3 |
-| `xs[a:b]` | Python's clamping slice | `slice` under `safe-slice` | 🚧 M2 |
+| `in`, `not in` on lists | membership | `.includes` | ✅ (dicts, sets, strings: M4) |
+| `xs[i]` | an out-of-range index must be proven impossible. A negative literal (`xs[-1]`) counts from the end; any other index must be proven non-negative | `xs[i]` | ✅ (non-literal negative indices: M3) |
+| `xs[a:b]`, `xs[a:]`, `xs[:b]` | Python's clamping slice (no step) | `slice` under `safe-slice` | ✅ |
 | bitwise `& \| ^ ~ << >>` | — | `&`, `\|`, `<<`, `>>` | 🚧 later |
 
 **Truthiness** follows Python, and every condition is made explicit:
 
 - `if n:` on an `int` means `n != 0`.
-- On containers, `if xs:` means `len(xs) > 0` (M2). This differs from JavaScript, where `[]` is truthy.
+- On lists, `if xs:` means `len(xs) > 0`. This differs from JavaScript, where `[]` is truthy.
 
 ## Statements and control flow
 
@@ -83,11 +83,11 @@ A differential harness backs this up. It runs the original Python against the co
 | `if` / `elif` / `else`, `return`, `pass` | `if` / `else if` / `else`, `return` | ✅ |
 | `raise …`, `assert c`: modelled as unreachable, so the proof must show they never fire | `throw new Error(…)` | ✅ |
 | calls to functions in the same module (positional arguments) | function calls | ✅ |
-| `while` with `#@ invariant` / `#@ decreases` | `while` | 🚧 M2 |
-| `for i in range(a, b)`, `for x in xs` | `for (let i…)`, `for (const x of xs)` | 🚧 M2 |
-| `break`, `continue` | same | 🚧 M2 |
-| recursion with `#@ decreases` | same | 🚧 M2 |
-| comprehensions, `all`/`any`/`sum`/`len` | `.map`, `.filter`, `.every`, `.some` | 🚧 M2 |
+| `while` with `#@ invariant` / `#@ decreases` | `while` | ✅ |
+| `for i in range(a, b)`, `for i, x in enumerate(xs)`, `for x in xs` | `for (let i…)`, `for (const x of xs)` | ✅ (range step: later) |
+| `break`, `continue` | same | ✅ |
+| recursion with `#@ decreases` | same | ✅ |
+| list comprehensions (one `for`, optional `if`), `all`/`any`, `len`, `min`/`max` of a list | `.map`, `.filter`, `.every`, `.some` | ✅ (`sum`: later) |
 | `match` on enums and record unions | `switch` on a discriminant | 🚧 M3 |
 | imports across modules, `#@ extern` | cross-file calls, `//@ extern` | 🚧 M5 |
 | `try`/`except`, `with`, `global`/`nonlocal`, nested functions, classes with methods, generators, `async`, `lambda` outside builtins, default/keyword/`*args` parameters | — | ❌ |
@@ -98,7 +98,7 @@ A differential harness backs this up. It runs the original Python against the co
 
 **Must return.** A function with a non-`None` return type must return or raise on every path. Python would silently return `None`, which the model could not represent.
 
-**Aliasing (from M2).** Python lists, dicts and sets are shared references, while the model treats them as values. The following keep any sharing invisible:
+**Aliasing.** Python lists, dicts and sets are shared references, while the model treats them as values. The following keep any sharing invisible:
 
 - Only locals built from fresh values may be modified in place.
 - Such a local may not be stored or passed anywhere a second reference could observe the change.
@@ -121,15 +121,15 @@ Annotations are `#@` comments at the start of a function body, before or after i
 | `#@ verify` | opt-in mode: once any function has it, only marked functions are verified | ✅ |
 | `#@ pure`, `#@ type x nat`, `#@ contract …` | as upstream | ✅ |
 | `#@ backend dafny`, `#@ option key value` | file-level, before the first statement | ✅ |
-| `#@ invariant P`, `#@ decreases E`, `#@ done_with P` | loops and recursion | 🚧 M2 |
-| `#@ assert P`, `#@ ghost x = E` | statement-level proof hints | 🚧 M2 |
+| `#@ invariant P`, `#@ decreases E`, `#@ done_with P` | loops and recursion | ✅ |
+| `#@ assert P`, `#@ ghost x: T = E`, `#@ ghost x = E` | statement-level proof hints | ✅ |
 
 **Spec expressions** are Python expressions, with Python semantics, plus a few extensions:
 
 - `A ==> B` (implies) and `A <==> B` (if and only if). Both bind looser than `or` and are right-associative.
 - `result`, the return value. It is only allowed in `ensures`, and a parameter named `result` is rejected.
 - Calls to functions in the same module. Calls to ghost functions defined only in the `.dfy` proof file pass through to Dafny.
-- Quantifiers (M2): `forall(k, P)` / `exists(k, P)` with an optional binder type, `forall(k: int, P)`, and bounded `all(P for k in range(a, b))`.
+- Quantifiers: `forall(k, P)` / `exists(k, P)` with an optional binder type, `forall(k: int, P)`, and bounded `all(P for k in range(a, b))`.
 
 Specs are parsed with Python's own parser and lowered by the same code as function bodies. So `%`, `//` and truthiness mean the same thing in a contract as in the code.
 
