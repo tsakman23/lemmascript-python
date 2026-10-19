@@ -38,7 +38,7 @@ def test_envelope_header() -> None:
     assert env["version"] == 1
     assert env["source"] == "clamp.py"
     assert env["producer"]["name"] == "lemmascript-python"
-    assert env["directives"] == {"backend": None, "options": {}, "leanModule": None}
+    assert env["directives"] == {"backend": None, "options": {"safe-slice": True}, "leanModule": None}
     m = env["module"]
     assert m["file"] == "clamp.py"
     assert (m["typeDecls"], m["externs"], m["constants"], m["classes"]) == ([], [], [], [])

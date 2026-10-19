@@ -1,3 +1,8 @@
 examples/clamp.py
 examples/divmod_floor.py
 examples/sign.py
+examples/array_sum.py
+examples/binary_search.py
+examples/has_duplicate.py
+examples/keep_positive.py
+examples/prune_window.py

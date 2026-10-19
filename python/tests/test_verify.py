@@ -19,5 +19,7 @@ GOLDEN = sorted((Path(__file__).resolve().parent / "golden").glob("*.dfy.gen"))
 def test_golden_fixture_verifies(gen: Path, tmp_path: Path) -> None:
     dfy = tmp_path / gen.name.removesuffix(".gen")
     shutil.copy(gen, dfy)
-    r = subprocess.run(["dafny", "verify", str(dfy)], capture_output=True, text=True, timeout=300)
+    # As lsc does: Dafny's standard library is needed when the text uses `Std.`.
+    std = ["--standard-libraries"] if "Std." in gen.read_text() else []
+    r = subprocess.run(["dafny", "verify", *std, str(dfy)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]

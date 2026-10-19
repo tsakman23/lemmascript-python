@@ -11,6 +11,8 @@ from lemmascript_python.annotations import (
     FILE_KEYWORDS,
     FUNCTION_KEYWORDS,
     KNOWN_KEYWORDS,
+    LOOP_KEYWORDS,
+    STATEMENT_KEYWORDS,
     Annotation,
     collect,
 )
@@ -26,7 +28,7 @@ ALLOWED_IMPORTS = frozenset({"__future__", "typing", "typing_extensions"})
 
 #: File-overridable lsc options (tools/src/config.ts), with their allowed values.
 FILE_OPTIONS: dict[str, tuple[str, ...]] = {
-    "safe-slice": ("true", "false"),
+    "safe-slice": ("true",),
     "extern-default": ("pure", "impure"),
     "string-semantics": ("unicode-scalar",),
     "dafny-library": ("stdlib", "local"),
@@ -77,6 +79,9 @@ class _Module:
             else:
                 key, _, value = a.text.partition(" ")
                 value = value.strip()
+                if key == "safe-slice" and value == "false":
+                    raise UnsupportedError("'safe-slice false' is not allowed: Python slices always clamp",
+                                           a.line, a.col)
                 if key == "string-semantics" and value == "javascript-utf16":
                     raise UnsupportedError("'string-semantics javascript-utf16' does not model Python strings "
                                            "(Python str is a sequence of code points)", a.line, a.col)
@@ -87,6 +92,9 @@ class _Module:
                     raise UnsupportedError(f"option '{key}' must be one of: {', '.join(FILE_OPTIONS[key])}",
                                            a.line, a.col)
                 options[key] = {"true": True, "false": False}.get(value, value)
+        # Python slices clamp out-of-range bounds and count negative ones from the
+        # end: exactly the engine's `safe-slice` model, so it is always on.
+        options["safe-slice"] = True
         return {"backend": backend, "options": options, "leanModule": None}
 
     # ── functions ────────────────────────────────────────────
@@ -103,7 +111,10 @@ class _Module:
                 break
         out = []
         for a in self.annotations:
-            if fn.lineno < a.line < stop and a.line not in doc_lines and a.col > fn.col_offset:
+            # Only function-level keywords; `#@ assert`/`#@ ghost` before the first
+            # statement belong to the body, and anything else is reported unclaimed.
+            if (fn.lineno < a.line < stop and a.line not in doc_lines and a.col > fn.col_offset
+                    and a.keyword in FUNCTION_KEYWORDS):
                 a.claimed = True
                 out.append(a)
         return out
@@ -156,7 +167,7 @@ class _Module:
             raise _err("top-level statement is not supported (only functions, imports and docstrings)", s)
 
         heads = {fn.name: self.head_annotations(fn) for fn in defs}
-        self.check_unclaimed(defs)
+        self.check_head_misplacements(defs)
         sigs = {fn.name: self.signature(fn) for fn in defs}
         verify_mode = any(a.keyword == "verify" for hs in heads.values() for a in hs)
         for name, sig in sigs.items():
@@ -166,6 +177,12 @@ class _Module:
         for fn in defs:
             if sigs[fn.name].verified:
                 functions.append(self.function(fn, sigs[fn.name], heads[fn.name], sigs, verify_mode))
+            else:
+                # Not verified: its annotations are not used, but must still be well placed.
+                for a in self.annotations:
+                    if fn.lineno < a.line <= self.extent_end(fn) and a.col > fn.col_offset:
+                        a.claimed = True
+        self.check_unclaimed(defs)
 
         return {
             "format": RAW_IR_FORMAT,
@@ -178,17 +195,33 @@ class _Module:
                        "functions": functions, "classes": []},
         }
 
-    def check_unclaimed(self, defs: list[ast.FunctionDef]) -> None:
-        # A function's extent runs to the next top-level statement, so a
-        # comment indented under its last line still counts as inside it.
+    def extent_end(self, fn: ast.FunctionDef) -> int:
+        """A function's extent runs to the next top-level statement, so a comment
+        indented under its last line still counts as inside it."""
         starts = sorted(s.lineno for s in self.tree.body)
-        def extent_end(fn: ast.FunctionDef) -> int:
-            return next((l - 1 for l in starts if l > fn.lineno), 10 ** 9)
+        return next((l - 1 for l in starts if l > fn.lineno), len(self.source.splitlines()) + 1)
+
+    def check_head_misplacements(self, defs: list[ast.FunctionDef]) -> None:
+        """Function-head annotations (requires, ensures, ...) found later in a body."""
+        for a in self.annotations:
+            if a.claimed or a.keyword not in FUNCTION_KEYWORDS or a.keyword in LOOP_KEYWORDS:
+                continue
+            if any(fn.lineno < a.line <= self.extent_end(fn) and a.col > fn.col_offset for fn in defs):
+                raise UnsupportedError(f"'#@ {a.keyword}' must come before the first statement of the function body",
+                                       a.line, a.col)
+
+    def check_unclaimed(self, defs: list[ast.FunctionDef]) -> None:
         for a in self.annotations:
             if a.claimed:
                 continue
             inside = next((fn for fn in defs
-                           if fn.lineno < a.line <= extent_end(fn) and a.col > fn.col_offset), None)
+                           if fn.lineno < a.line <= self.extent_end(fn) and a.col > fn.col_offset), None)
+            if inside is not None and a.keyword in LOOP_KEYWORDS:
+                raise UnsupportedError(f"'#@ {a.keyword}' belongs at the start of a loop body, before its first "
+                                       "statement", a.line, a.col)
+            if inside is not None and a.keyword in STATEMENT_KEYWORDS:
+                raise UnsupportedError(f"'#@ {a.keyword}' must be on its own line, indented like the statement "
+                                       "it precedes", a.line, a.col)
             if inside is not None and a.keyword in FUNCTION_KEYWORDS:
                 raise UnsupportedError(f"'#@ {a.keyword}' must come before the first statement of the function body",
                                        a.line, a.col)
@@ -207,7 +240,7 @@ class _Module:
                  sigs: dict[str, Signature], verify_mode: bool) -> dict[str, Any]:
         if any(p == "result" for p, _ in sig.params):
             raise _err("a parameter named 'result' clashes with the return value in '#@ ensures'; rename it", fn)
-        low = FunctionLowerer(sig, sigs, verify_mode, binding_counts(fn))
+        low = FunctionLowerer(sig, sigs, verify_mode, binding_counts(fn), self.annotations, self.identifiers())
         requires, ensures, contract = [], [], []
         decreases = None
         pure = False
@@ -229,7 +262,8 @@ class _Module:
                     raise UnsupportedError("'#@ type' is written '#@ type <name> nat'", a.line, a.col)
                 type_annotations.append({"name": parts[0], "type": parts[1]})
         body_stmts = [s for s in fn.body if not _is_docstring(s)] if fn.body else []
-        body = low.block(body_stmts)
+        body = low.body(body_stmts, fn.lineno, self.extent_end(fn) + 1)
+        low.check_aliasing()
         if sig.returns.kind != "none" and not always_exits(body_stmts):
             raise _err(f"'{fn.name}' may reach the end without returning (Python would return None)", fn)
         return {
