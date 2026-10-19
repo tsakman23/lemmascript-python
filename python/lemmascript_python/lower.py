@@ -116,6 +116,7 @@ class _Loop:
 class _Binding:
     fresh: bool
     node: ast.AST
+    loop: bool = False  # bound by a for loop to an element of the iterated list
 
 
 @dataclass
@@ -129,7 +130,8 @@ class FunctionLowerer:
 
     def __init__(self, sig: Signature, functions: dict[str, Signature], verify_mode: bool,
                  binding_counts: Counter[str], annotations: list[Annotation] | None = None,
-                 taken_names: set[str] | None = None, local_names: set[str] | None = None) -> None:
+                 taken_names: set[str] | None = None, local_names: set[str] | None = None,
+                 source_lines: list[str] | None = None) -> None:
         self.sig = sig
         self.functions = functions
         self.verify_mode = verify_mode
@@ -141,6 +143,7 @@ class FunctionLowerer:
         # Every name the function binds anywhere: Python treats it as local to the
         # whole function, so it never refers to a module function or builtin.
         self.local_names = local_names if local_names is not None else set(self.params)
+        self.source_lines = source_lines or []
         # Names whose first binding was in a block that has ended.
         self.expired: dict[str, int] = {}
         # Loop variables after their loop has ended.
@@ -194,10 +197,10 @@ class FunctionLowerer:
             self.expired.setdefault(name, line)
 
     def hide_loop_var(self, name: str, line: int) -> None:
-        for f in reversed(self.frames):
-            if name in f.names:
-                del f.names[name]
-                break
+        # Unreadable after the loop in every enclosing block: Python leaves it at the
+        # last element (or unchanged if the loop never ran), which the model doesn't track.
+        for f in self.frames:
+            f.names.pop(name, None)
         self.loop_vars.discard(name)
         self.loop_expired[name] = line
 
@@ -229,9 +232,11 @@ class FunctionLowerer:
         name = name.strip()
         if not name.isidentifier():
             raise UnsupportedError(f"invalid ghost variable name '{name}'", a.line, a.col)
-        value, vty = self.spec_typed(init.strip(), a.line)
+        declared_ty = from_type_text(ty_text.strip(), a.line) if colon else None
+        value, vty = self.spec_typed(init.strip(), a.line, declared_ty or self.lookup(name))
         if colon:
-            ty = from_type_text(ty_text.strip(), a.line)
+            assert declared_ty is not None
+            ty = declared_ty
             self.check_type(vty, ty, a, f"ghost '{name}' is declared '{ty}' and is assigned")
             self.frames[-1].names[name] = ty
             self.frames[-1].declared[name] = ty
@@ -299,9 +304,9 @@ class FunctionLowerer:
             return [self.aug_assign(s)]
         if isinstance(s, ast.If):
             cond = self.cond(s.test)
-            then_end = s.orelse[0].lineno if s.orelse else boundary
-            then = self.nested(s.body, line, then_end, s.end_lineno or line)
-            else_ = self.nested(s.orelse, then_end - 1 if s.orelse else line, boundary, s.end_lineno or line)
+            else_ln = self.else_line(s) if s.orelse else boundary
+            then = self.nested(s.body, line, else_ln, s.end_lineno or line)
+            else_ = self.nested(s.orelse, else_ln, boundary, s.end_lineno or line)
             return [{"kind": "if", "cond": cond, "then": then, "else": else_, "line": line}]
         if isinstance(s, ast.Raise):
             return [{"kind": "throw", "line": line}]
@@ -339,6 +344,20 @@ class FunctionLowerer:
         if isinstance(s, ast.Delete):
             raise _err("'del' is not supported yet", s)
         raise _err(f"'{type(s).__name__}' statements are not supported", s)
+
+    def else_line(self, s: ast.If) -> int:
+        """The line of the `else:` / `elif` that starts ``s.orelse`` (the AST does not record it)."""
+        first = s.orelse[0]
+        if isinstance(first, ast.If) and self.line_text(first.lineno).lstrip().startswith("elif"):
+            return first.lineno
+        for ln in range((s.body[-1].end_lineno or s.body[-1].lineno) + 1, first.lineno + 1):
+            text = self.line_text(ln)
+            if text.lstrip().startswith("else") and len(text) - len(text.lstrip()) == s.col_offset:
+                return ln
+        return first.lineno
+
+    def line_text(self, ln: int) -> str:
+        return self.source_lines[ln - 1] if 0 < ln <= len(self.source_lines) else ""
 
     def return_(self, s: ast.Return) -> Raw:
         want = self.sig.returns
@@ -384,16 +403,21 @@ class FunctionLowerer:
 
     def aug_assign(self, s: ast.AugAssign) -> Raw:
         if isinstance(s.target, ast.Subscript):
+            elem = self.static_type(s.target)
+            if elem is not None and elem.is_list:
+                raise _err("'+=' on an element that is a list changes that inner list in place "
+                           "(Python calls its __iadd__); write 'xs[i] = xs[i] + ys' instead", s)
             cur = ast.Subscript(s.target.value, s.target.slice, ast.Load(), lineno=s.lineno, col_offset=s.col_offset)
             new = ast.BinOp(cur, s.op, s.value, lineno=s.lineno, col_offset=s.col_offset)
             return self.set_item(s.target, new, s)
         if not isinstance(s.target, ast.Name):
             raise _err("only assignment to a single name is supported yet", s)
         name = s.target.id
-        if name in self.loop_vars:
+        self.no_ghost(name, s)
+        ty = self.lookup(name)
+        if name in self.loop_vars and not (ty is not None and ty.is_list):
             raise _err(f"cannot assign the loop variable '{name}' inside its loop "
                        "(Python would not change the iteration)", s)
-        ty = self.lookup(name)
         if ty is None:
             raise _err(f"'{name}' is assigned with '{ast.unparse(s)}' before it is bound", s)
         if ty.is_list:
@@ -411,6 +435,7 @@ class FunctionLowerer:
         if not isinstance(target.value, ast.Name):
             raise _err("nested in-place modification (e.g. 'a[i][j] = v') is not supported", s)
         name = target.value.id
+        self.no_ghost(name, s)
         ty = self.lookup(name)
         if ty is None or not ty.is_list:
             raise _err(f"item assignment needs a list, got '{name}'", s)
@@ -439,6 +464,7 @@ class FunctionLowerer:
 
     def list_mutation(self, name: str, ty: PyType, meth: str, c: ast.Call, s: ast.stmt) -> Raw:
         assert ty.elem is not None
+        self.no_ghost(name, s)
         if c.keywords or len(c.args) != 1:
             raise _err(f"'{meth}' takes one positional argument", s)
         self.mutate(name, s)
@@ -449,6 +475,10 @@ class FunctionLowerer:
         arg, aty = self.expr(c.args[0], ty, share=False)
         self.expect(aty, ty, c.args[0], f"'{name}.extend' gets")
         return {"kind": "assign", "target": name, "value": binop("arrayConcat", var(name), arg), "line": s.lineno}
+
+    def no_ghost(self, name: str, node: ast.AST) -> None:
+        if self.is_ghost(name):
+            raise _err(f"ghost variable '{name}' cannot be changed by code; use '#@ ghost {name} = ...'", node)
 
     def mutate(self, name: str, node: ast.AST) -> None:
         if name in self.iterating:
@@ -484,6 +514,10 @@ class FunctionLowerer:
         return {"kind": "while", "cond": cond, "invariants": invariants, "decreases": decreases,
                 "doneWith": done_with, "body": body, "line": s.lineno}
 
+    def not_active_loop_var(self, name: str, node: ast.AST) -> None:
+        if name in self.loop_vars:
+            raise _err(f"'{name}' is already the variable of an enclosing loop; use a new name", node)
+
     def loop_counter(self, name: str, init: Raw, line: int) -> Raw:
         """Bind a desugared loop's counter (re-using a previous Raw IR declaration of it)."""
         prior = self.declared(name)
@@ -498,19 +532,21 @@ class FunctionLowerer:
         self.taken.add(name)
         return {"kind": "let", "name": name, "mutable": True, "tsType": "int", "init": init, "line": line}
 
-    def stable(self, node: ast.expr, body: list[ast.stmt]) -> bool:
-        """``node`` evaluates to the same value throughout ``body`` (a literal or an unassigned name)."""
+    def stable(self, node: ast.expr, body: list[ast.stmt], target: str) -> bool:
+        """``node`` evaluates to the same value throughout the loop: a literal, or a name that
+        neither the body nor the loop's own counter assignment changes."""
         if isinstance(node, ast.Constant) or (isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant)):
             return True
         if isinstance(node, ast.Name):
-            return node.id not in _assigned_names(body)
+            return node.id != target and node.id not in _assigned_names(body)
         return False
 
-    def bound_once(self, base: str, node: ast.expr, body: list[ast.stmt], line: int, out: list[Raw]) -> Raw:
+    def bound_once(self, base: str, node: ast.expr, body: list[ast.stmt], line: int, out: list[Raw],
+                   target: str) -> Raw:
         """Python evaluates `range(...)` bounds once; keep that by binding non-stable ones to a fresh local."""
         raw, ty = self.expr(node)
         self.need_int(ty, node, "range()")
-        if self.stable(node, body):
+        if self.stable(node, body, target):
             return raw
         name = self.fresh(base)
         self.frames[-1].declared[name] = INT
@@ -530,10 +566,11 @@ class FunctionLowerer:
             if len(args) not in (1, 2):
                 raise _err("only range(stop) and range(start, stop) are supported yet", s)
             i = tgt.id
+            self.not_active_loop_var(i, s)
             start_node = args[0] if len(args) == 2 else ast.Constant(0, lineno=line, col_offset=0)
             stop_node = args[-1]
-            start = self.bound_once(f"{i}_start", start_node, s.body, line, out)
-            stop = self.bound_once(f"{i}_stop", stop_node, s.body, line, out)
+            start = self.bound_once(f"{i}_start", start_node, s.body, line, out, i)
+            stop = self.bound_once(f"{i}_stop", stop_node, s.body, line, out, i)
             out.append(self.loop_counter(i, start, line))
             auto = binop("&&", binop("<=", start, var(i)), binop("||", binop("<=", var(i), stop), binop("===", var(i), start)))
             inc = {"kind": "assign", "target": i, "value": binop("+", var(i), num(1)), "line": line}
@@ -549,6 +586,9 @@ class FunctionLowerer:
                 raise _err(f"enumerate needs a list, got '{sty}'", s)
             assert sty.elem is not None
             i, x = (e.id for e in tgt.elts if isinstance(e, ast.Name))
+            self.not_active_loop_var(i, s)
+            self.not_active_loop_var(x, s)
+            self.not_reassigned(args[0].id, s.body)
             out.append(self.loop_counter(i, num(0), line))
             auto = binop("&&", binop("<=", num(0), var(i)), binop("<=", var(i), length(seq)))
             inc = {"kind": "assign", "target": i, "value": binop("+", var(i), num(1)), "line": line}
@@ -570,8 +610,18 @@ class FunctionLowerer:
             raise _err(f"cannot iterate over '{sty}'", s)
         assert sty.elem is not None
         x = tgt.id
+        self.not_active_loop_var(x, s)
         if self.lookup(x) is not None or self.declared(x) is not None:
             raise _err(f"the loop variable '{x}' is already bound; use a new name", s)
+        # Python iterates the list object it got at loop entry.
+        live = _live_names(it)
+        if isinstance(it, ast.Name):
+            self.not_reassigned(it.id, s.body)
+        else:
+            snap = self.fresh(f"{x}_iter")
+            self.frames[-1].declared[snap] = sty
+            out.append({"kind": "let", "name": snap, "mutable": False, "tsType": sty.raw, "init": seq, "line": line})
+            seq = var(snap)
         invariants, decreases, done_with = self.loop_specs(s)
         if decreases is not None:
             raise _err("a 'for x in xs' loop terminates on its own; '#@ decreases' is not used", s)
@@ -580,21 +630,22 @@ class FunctionLowerer:
         self.frames[-1].declared[x] = sty.elem
         self.taken.add(x)
         self.loop_vars.add(x)
+        if sty.elem.is_list:
+            self.bindings.setdefault(x, []).append(_Binding(False, s, loop=True))
         self.loops.append(_Loop(None))
-        if isinstance(it, ast.Name):
-            self.iterating.append(it.id)
+        self.iterating.extend(live)
         try:
             body = self.body(s.body, line, boundary)
         finally:
-            if isinstance(it, ast.Name):
-                self.iterating.pop()
+            del self.iterating[len(self.iterating) - len(live):]
             self.loops.pop()
             self.loop_vars.discard(x)
             self.pop(s.end_lineno or line)
         self.expired.pop(x, None)
         self.loop_expired[x] = s.end_lineno or line
-        return [{"kind": "forof", "names": [x], "iterable": seq, "invariants": invariants, "doneWith": done_with,
-                 "body": body, "line": line}]
+        out.append({"kind": "forof", "names": [x], "iterable": seq, "invariants": invariants, "doneWith": done_with,
+                    "body": body, "line": line})
+        return out
 
     def counted_loop(self, s: ast.For, i: str, cond: Raw, auto: Raw, inc: Raw,
                      elem: tuple[str, PyType, Raw] | None, boundary: int) -> Raw:
@@ -611,6 +662,8 @@ class FunctionLowerer:
             self.frames[-1].declared[x] = xty
             self.taken.add(x)
             self.loop_vars.add(x)
+            if xty.is_list:
+                self.bindings.setdefault(x, []).append(_Binding(False, s, loop=True))
             pre.append({"kind": "let", "name": x, "mutable": False, "tsType": xty.raw, "init": init, "line": s.lineno})
         try:
             body = self.body(s.body, s.lineno, boundary)
@@ -630,6 +683,27 @@ class FunctionLowerer:
             pass
         return {"kind": "while", "cond": cond, "invariants": [auto, *invariants], "decreases": decreases,
                 "doneWith": done_with, "body": [*pre, *body, inc], "line": s.lineno}
+
+    def not_reassigned(self, name: str, body: list[ast.stmt]) -> None:
+        """A loop over the list `name` keeps iterating the original list if `name` is rebound;
+        the model would re-read the variable, so rebinding it in the loop is rejected."""
+        for st in body:
+            for n in ast.walk(st):
+                targets: list[ast.expr] = []
+                if isinstance(n, ast.Assign):
+                    targets = list(n.targets)
+                elif isinstance(n, (ast.AnnAssign, ast.For)):
+                    targets = [n.target]
+                elif isinstance(n, ast.AugAssign) and not self._is_list_name(n.target):
+                    targets = [n.target]
+                for t in targets:
+                    if any(isinstance(x, ast.Name) and x.id == name for x in ast.walk(t)):
+                        raise _err(f"'{name}' is reassigned inside a loop over it (Python keeps iterating the "
+                                   "original list); use a new variable", n)
+
+    def _is_list_name(self, t: ast.expr) -> bool:
+        ty = self.lookup(t.id) if isinstance(t, ast.Name) else None
+        return ty is not None and ty.is_list
 
     # ── expressions ──────────────────────────────────────────
 
@@ -884,7 +958,8 @@ class FunctionLowerer:
         index must be proven in range by the verifier (Dafny's bounds check)."""
         if (isinstance(idx_node, ast.UnaryOp) and isinstance(idx_node.op, ast.USub)
                 and isinstance(idx_node.operand, ast.Constant) and type(idx_node.operand.value) is int):
-            return binop("-", length(seq), num(idx_node.operand.value))
+            k = idx_node.operand.value
+            return num(0) if k == 0 else binop("-", length(seq), num(k))
         raw, ty = self.expr(idx_node)
         self.need_int(ty, idx_node, "a list index")
         return raw
@@ -1139,11 +1214,11 @@ class FunctionLowerer:
 
     # ── specs ────────────────────────────────────────────────
 
-    def spec_typed(self, text: str, line: int) -> Typed:
+    def spec_typed(self, text: str, line: int, expected: PyType | None = None) -> Typed:
         tree = specs.parse(text, line)
         self.in_spec = True
         try:
-            return self.expr(tree)
+            return self.expr(tree, expected)
         finally:
             self.in_spec = False
 
@@ -1170,6 +1245,9 @@ class FunctionLowerer:
                 raise _err(f"cannot modify parameter '{name}' in place (Python would change the caller's "
                            f"list); copy it first, e.g. 'ys = list({name})'", first)
             for b in self.bindings.get(name, []):
+                if b.loop:
+                    raise _err(f"'{name}' is a loop variable bound to an element of the list being iterated; "
+                               "changing it in place would change that list (copy it first)", b.node)
                 if not b.fresh:
                     raise _err(f"'{name}' is modified in place, so it must be bound to a fresh list "
                                "(a literal, comprehension, list(...), slice or concatenation)", b.node)
@@ -1198,13 +1276,24 @@ def _assigned_names(stmts: list[ast.stmt]) -> set[str]:
     out: set[str] = set()
     for s in stmts:
         for n in ast.walk(s):
+            targets: list[ast.expr] = []
             if isinstance(n, ast.Assign):
-                out.update(t.id for t in n.targets if isinstance(t, ast.Name))
-            elif isinstance(n, (ast.AugAssign, ast.AnnAssign)) and isinstance(n.target, ast.Name):
-                out.add(n.target.id)
-            elif isinstance(n, ast.For) and isinstance(n.target, ast.Name):
-                out.add(n.target.id)
+                targets = list(n.targets)
+            elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.For, ast.NamedExpr)):
+                targets = [n.target]
+            for t in targets:
+                out.update(x.id for x in ast.walk(t) if isinstance(x, ast.Name))
     return out
+
+
+def _live_names(node: ast.expr) -> list[str]:
+    """Variables whose list object a `for` loop iterates directly (not a copy): Python's
+    iterator would see in-place changes to them."""
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, ast.IfExp):
+        return _live_names(node.body) + _live_names(node.orelse)
+    return []
 
 
 def always_exits(stmts: list[ast.stmt]) -> bool:

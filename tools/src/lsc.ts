@@ -24,6 +24,7 @@ import { runInfo, runTypedInfo, type TypedInfoDafny } from "./info-command.js";
 import { RunLog, resolveLogDir, runLogEnabled } from "./run-log.js";
 import { isExternalSource, loadExternalSource, sourceBase, type FrontendResult } from "./frontend.js";
 import { setUserNames } from "./names.js";
+import { setStructuralEquality } from "./resolve.js";
 import { runRuns } from "./runs-command.js";
 import {
   findUp,
@@ -347,6 +348,7 @@ function runFile(
     ? loadExternal(absPath, configPath)
     : extractTypeScript(absPath, configPath);
   const { raw, options, configFile, displayName } = front;
+  setStructuralEquality(front.structuralEquality);
   const backendDirective = front.backend;
   const leanModuleOverride = front.leanModule;
   // Checked here, for every command, so a bad LSC_RUN_LOG fails like a bad config value.
@@ -479,6 +481,7 @@ interface LoadedSource {
   backend: string | null;
   leanModule: string | undefined;
   displayName: string;
+  structuralEquality: boolean;
 }
 
 /** The built-in TypeScript frontend: ts-morph extraction plus `//@ ` directives. */
@@ -515,6 +518,7 @@ function extractTypeScript(absPath: string, configPath?: string): LoadedSource {
     backend: backendMatch ? backendMatch[1] : null,
     leanModule: leanModuleOverride,
     displayName: path.basename(absPath),
+    structuralEquality: false,
   };
 }
 
@@ -530,6 +534,7 @@ function loadExternal(absPath: string, configPath?: string): LoadedSource {
     raw: front.raw, options, configFile: loaded.configFile,
     // Lean module names come from the file stem (`foo.py` → `foo`), never the full name.
     backend: front.backend, leanModule: front.leanModule ?? sourceBase(absPath), displayName: front.displayName,
+    structuralEquality: front.structuralEquality,
   };
 }
 

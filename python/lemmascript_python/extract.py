@@ -102,7 +102,8 @@ class _Module:
         # Python slices clamp out-of-range bounds and count negative ones from the
         # end: exactly the engine's `safe-slice` model, so it is always on.
         options["safe-slice"] = True
-        return {"backend": backend, "options": options, "leanModule": None}
+        # Python's `==` compares contents (lists, records) — tell the engine.
+        return {"backend": backend, "options": options, "leanModule": None, "equality": "structural"}
 
     # ── functions ────────────────────────────────────────────
 
@@ -306,7 +307,8 @@ class _Module:
         if any(p == "result" for p, _ in sig.params):
             raise _err("a parameter named 'result' clashes with the return value in '#@ ensures'; rename it", fn)
         low = FunctionLowerer(sig, sigs, verify_mode, binding_counts(fn), self.annotations, self.identifiers(),
-                              local_names=_bound_names(fn) | {p for p, _ in sig.params})
+                              local_names=_bound_names(fn) | {p for p, _ in sig.params},
+                              source_lines=self.source.splitlines())
         requires, ensures, contract = [], [], []
         decreases = None
         pure = False

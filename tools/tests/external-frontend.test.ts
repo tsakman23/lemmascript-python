@@ -160,3 +160,29 @@ test("a failing frontend's stderr is surfaced and lsc exits non-zero", () => {
     assert.match(r.stderr, /ops\.py:3: unsupported construct/);
   });
 });
+
+test("an envelope declaring structural equality suppresses the TS reference-equality warning", () => {
+  // f(a, b) = a == b over int arrays: a reference-equality hazard in TypeScript only.
+  const mod = {
+    file: "eq.py", typeDecls: [], externs: [], constants: [], classes: [],
+    functions: [{
+      name: "f", exported: true, typeParams: [],
+      params: [{ name: "a", tsType: "int[]" }, { name: "b", tsType: "int[]" }],
+      tsParams: [{ kind: "simple", binds: ["a"] }, { kind: "simple", binds: ["b"] }],
+      returnType: "boolean", requires: [], ensures: [], contract: [], decreases: null, pure: false,
+      autohavoc: false, typeAnnotations: [],
+      body: [{ kind: "return", line: 1, value: { kind: "binop", op: "===", left: { kind: "var", name: "a" }, right: { kind: "var", name: "b" } } }],
+      line: 1,
+    }],
+  };
+  withDir(dir => {
+    writeFileSync(join(dir, "ref.rawir.json"), JSON.stringify(envelope(mod)));
+    writeFileSync(join(dir, "eq.rawir.json"), JSON.stringify(envelope(mod, { directives: { equality: "structural" } })));
+    const ref = lsc(["gen", "--backend=dafny", "ref.rawir.json"], dir);
+    const eq = lsc(["gen", "--backend=dafny", "eq.rawir.json"], dir);
+    assert.equal(ref.status, 0, ref.stderr);
+    assert.equal(eq.status, 0, eq.stderr);
+    assert.match(ref.stderr, /reference equality/);
+    assert.doesNotMatch(eq.stderr, /reference equality/);
+  });
+});

@@ -380,7 +380,12 @@ function refEqHazard(ty: Ty, typeDecls: TypeDeclInfo[]): boolean {
 }
 
 const _warnedRefEq = new Set<string>();
+// HOOK(external-frontend): a source language whose `==` is structural (declared in
+// the Raw IR envelope) has no reference-equality hazard to warn about.
+let _structuralEquality = false;
+export function setStructuralEquality(on: boolean): void { _structuralEquality = on; }
 function warnRefEq(op: string, l: Ty, r: Ty): void {
+  if (_structuralEquality) return;
   const label = (t: Ty) => t.kind === "user" ? t.name : t.kind;
   const msg = `'${op}' compares non-primitive operands (${label(l)} ${op} ${label(r)}): structural equality in the proof, but reference equality when this TypeScript runs. Sound only if operands are primitives or a canonical (string/number) encoding; otherwise compare via an explicit structural equals.`;
   if (_warnedRefEq.has(msg)) return;

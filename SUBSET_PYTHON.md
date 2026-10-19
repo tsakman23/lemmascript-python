@@ -102,7 +102,14 @@ A differential harness backs this up. It runs the original Python against the co
 
 - Only locals built from fresh values may be modified in place.
 - Such a local may not be stored or passed anywhere a second reference could observe the change.
-- Parameters are never modified in place. Copy first, e.g. `xs = list(xs)`.
+- Parameters are never modified in place. Copy into a new variable first, e.g. `ys = list(xs)`.
+- A loop variable over a list of lists refers to the inner list, so it is never modified in place. Nor is a list element that is itself a list: `xs[i] += ys` extends the inner list in place.
+- Python iterates the list object it got at loop entry. Two rules keep the model in step:
+  - a list being iterated may not be modified in place;
+  - a loop over a variable may not reassign that variable.
+
+  A loop over any other expression (`for x in xs[:]`) iterates a snapshot.
+- Nested loops may not share a loop variable.
 
 ## The annotation layer
 

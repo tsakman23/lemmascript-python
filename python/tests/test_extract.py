@@ -38,7 +38,8 @@ def test_envelope_header() -> None:
     assert env["version"] == 1
     assert env["source"] == "clamp.py"
     assert env["producer"]["name"] == "lemmascript-python"
-    assert env["directives"] == {"backend": None, "options": {"safe-slice": True}, "leanModule": None}
+    assert env["directives"] == {"backend": None, "options": {"safe-slice": True}, "leanModule": None,
+                                 "equality": "structural"}
     m = env["module"]
     assert m["file"] == "clamp.py"
     assert (m["typeDecls"], m["externs"], m["constants"], m["classes"]) == ([], [], [], [])
@@ -178,7 +179,8 @@ def test_verify_opt_in_mode() -> None:
 
 def test_file_directives() -> None:
     env = extract("#@ backend dafny\n#@ option safe-slice true\n\ndef f(x: int) -> int:\n    return x\n")
-    assert env["directives"] == {"backend": "dafny", "options": {"safe-slice": True}, "leanModule": None}
+    assert env["directives"] == {"backend": "dafny", "options": {"safe-slice": True}, "leanModule": None,
+                                 "equality": "structural"}
 
 
 def test_main_guard_and_typing_imports_are_ignored() -> None:

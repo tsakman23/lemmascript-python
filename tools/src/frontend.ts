@@ -11,7 +11,8 @@
  *     "producer":   { "name": "...", "version": "..." },        (informational)
  *     "source":     "foo.py",                                  (optional; names the generated header)
  *     "identifiers": ["x", "lo", ...],                          (optional; every source identifier)
- *     "directives": { "backend": null, "options": {...}, "leanModule": null },  (optional)
+ *     "directives": { "backend": null, "options": {...}, "leanModule": null,
+ *                     "equality": "structural" },                 (optional; default "reference")
  *     "module":     RawModule }
  *
  * `lsc <cmd> foo.rawir.json` reads an envelope directly. Any other non-TS
@@ -38,7 +39,8 @@ export interface RawIrEnvelope {
   producer?: { name: string; version: string };
   source?: string;
   identifiers?: string[];
-  directives?: { backend?: string | null; options?: Record<string, unknown>; leanModule?: string | null };
+  directives?: { backend?: string | null; options?: Record<string, unknown>; leanModule?: string | null;
+                 equality?: "reference" | "structural" };
   module: RawModule;
 }
 
@@ -53,6 +55,8 @@ export interface FrontendResult {
   displayName: string;
   /** Names to seed `setUserNames` with. */
   identifiers: Set<string>;
+  /** The source language's `==` compares contents (no reference-equality hazard). */
+  structuralEquality: boolean;
 }
 
 export function isExternalSource(filePath: string): boolean {
@@ -141,6 +145,7 @@ export function loadExternalSource(absPath: string, frontends: Record<string, st
     leanModule: d.leanModule ?? undefined,
     displayName,
     identifiers: collectIdentifiers(envelope.module, envelope.identifiers ?? []),
+    structuralEquality: d.equality === "structural",
   };
 }
 
