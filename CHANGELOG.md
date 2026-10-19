@@ -5,7 +5,7 @@ One entry per upstream sync and per milestone.
 ## Unreleased
 
 - **M1:** Python frontend for `int`/`bool` functions with `#@ requires`/`ensures`, end to end (gen → check → differential).
-- **Engine hooks** (proposed upstream):
+- **Fork-only engine patches**, carried on each upstream sync and marked `HOOK(external-frontend)` in `tools/src`:
   - external-frontend Raw IR envelope and the `frontends` config key;
   - pre-parsed spec expressions;
   - `floordiv`/`floormod` ops.
