@@ -14,7 +14,7 @@ This fork adds a **Python frontend**. Fully type-annotated Python with `#@` cont
 
 The frontend models Python semantics, not JavaScript: `//` and `%` floor, ints are unbounded, and truthiness follows Python. A differential test runs the original Python against the compiled Dafny model to check that a proof carries over to the real code. Unsupported constructs are rejected with a located error. Status: **M1**: `int`/`bool` functions with `requires`/`ensures`. See [python/README.md](python/README.md) and [python/examples](python/examples).
 
-**Upstream compatibility:** Based on LemmaScript v0.6.4 (upstream commit `4b77a79`).
+**Upstream compatibility:** Based on LemmaScript v0.6.5 (upstream commit `ffc07fc`).
 
 ## Examples and Case Studies
 
