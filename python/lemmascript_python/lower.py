@@ -18,6 +18,7 @@ subset has no side effects, so re-evaluating a pure operand (``a ** 2`` →
 from __future__ import annotations
 
 import ast
+import builtins
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -128,7 +129,7 @@ class FunctionLowerer:
 
     def __init__(self, sig: Signature, functions: dict[str, Signature], verify_mode: bool,
                  binding_counts: Counter[str], annotations: list[Annotation] | None = None,
-                 taken_names: set[str] | None = None) -> None:
+                 taken_names: set[str] | None = None, local_names: set[str] | None = None) -> None:
         self.sig = sig
         self.functions = functions
         self.verify_mode = verify_mode
@@ -137,6 +138,9 @@ class FunctionLowerer:
         self.taken = set(taken_names or ()) | {n for n, _ in sig.params}
         self.frames: list[_Frame] = [_Frame(dict(sig.params), dict(sig.params))]
         self.params = {n for n, _ in sig.params}
+        # Every name the function binds anywhere: Python treats it as local to the
+        # whole function, so it never refers to a module function or builtin.
+        self.local_names = local_names if local_names is not None else set(self.params)
         # Names whose first binding was in a block that has ended.
         self.expired: dict[str, int] = {}
         # Loop variables after their loop has ended.
@@ -1033,8 +1037,9 @@ class FunctionLowerer:
         if not isinstance(node.func, ast.Name):
             raise _err(f"call '{ast.unparse(node)}' is not supported yet", node)
         name = node.func.id
-        if self.lookup(name) is not None:
-            raise _err(f"'{name}' is not a function", node)
+        if self.lookup(name) is not None or name in self.local_names:
+            raise _err(f"'{name}' is a local variable of '{self.sig.name}' (Python makes every name assigned in a "
+                       f"function local to all of it), so '{name}(...)' does not call a function", node)
         if name in self.functions:
             return self.user_call(self.functions[name], node)
         if name in (specs.IMPLIES, specs.IFF) and self.in_spec:
@@ -1063,9 +1068,11 @@ class FunctionLowerer:
             # Python raises ValueError on an empty list; MinOfSeq/MaxOfSeq require |s| > 0.
             return {"kind": "call", "fn": var("MinOfSeq" if name == "min" else "MaxOfSeq"), "args": [raw]}, INT
         if name in ("sum", "sorted", "reversed", "range", "zip", "map", "filter"):
-            raise _err(f"'{name}(...)' is not supported yet", node)
+            raise _err(f"'{name}' is not supported {'in specs' if self.in_spec else 'yet'}", node)
         args = [self.expr(a, share=False) for a in node.args]
-        if name == "abs" and len(args) == 1:
+        if name == "abs":
+            if len(args) != 1:
+                raise _err("abs() takes one argument", node)
             self.need_int(args[0][1], node, "abs()")
             return math_call("abs", args[0][0]), INT
         if name in ("min", "max") and len(args) >= 2:
@@ -1075,10 +1082,19 @@ class FunctionLowerer:
             for a, _ in args[1:]:
                 out = math_call(name, out, a)
             return out, INT
-        if name == "bool" and len(args) == 1:
+        if name == "bool":
+            if len(args) != 1:
+                raise _err("bool() takes one argument", node)
             return self.truthy(args[0], node), BOOL
-        if name == "int" and len(args) == 1 and args[0][1] == INT:
+        if name == "int":
+            if len(args) != 1 or args[0][1] != INT:
+                raise _err("int(...) is supported on an 'int' only (bool-to-int conversion is not)", node)
             return args[0][0], INT
+        if name in ("min", "max"):
+            raise _err(f"{name}() takes a list or at least two ints", node)
+        if hasattr(builtins, name):
+            where = "in specs" if self.in_spec else "yet"
+            raise _err(f"'{name}' is not supported {where}", node)
         if self.in_spec:
             # Spec-only pass-through: the engine resolves the name (e.g. a ghost
             # function defined in the .dfy proof file), as upstream allows.
@@ -1086,7 +1102,7 @@ class FunctionLowerer:
         raise _err(f"unknown function '{name}'", node)
 
     def user_call(self, sig: Signature, node: ast.Call) -> Typed:
-        if self.verify_mode and not sig.verified and not self.in_spec:
+        if self.verify_mode and not sig.verified:
             raise _err(f"'{self.sig.name}' calls '{sig.name}', which is not marked '#@ verify'", node)
         if len(node.args) != len(sig.params):
             raise _err(f"'{sig.name}' takes {len(sig.params)} argument(s), got {len(node.args)}", node)

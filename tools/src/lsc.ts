@@ -528,7 +528,8 @@ function loadExternal(absPath: string, configPath?: string): LoadedSource {
   const options = resolveOptions({ ...loaded.explicit, ...front.fileOptions }, absPath);
   return {
     raw: front.raw, options, configFile: loaded.configFile,
-    backend: front.backend, leanModule: front.leanModule, displayName: front.displayName,
+    // Lean module names come from the file stem (`foo.py` → `foo`), never the full name.
+    backend: front.backend, leanModule: front.leanModule ?? sourceBase(absPath), displayName: front.displayName,
   };
 }
 

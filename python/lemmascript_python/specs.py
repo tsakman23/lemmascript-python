@@ -41,6 +41,11 @@ def _tokens(text: str, line: int) -> list[_Tok]:
         for t in tokenize.generate_tokens(io.StringIO(text).readline):
             if t.type in (tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT, tokenize.DEDENT):
                 continue
+            if t.type == tokenize.COMMENT:
+                if t.string.startswith("#@"):
+                    raise UnsupportedError("one annotation per line: a second '#@' would be read as a comment",
+                                           line)
+                continue  # a plain trailing comment
             if t.type in (tokenize.FSTRING_START, tokenize.FSTRING_MIDDLE, tokenize.FSTRING_END):
                 raise UnsupportedError("f-strings are not supported in spec expressions", line)
             if t.start[0] != 1:
@@ -191,6 +196,8 @@ def parse(text: str, line: int) -> ast.expr:
     """Parse a spec expression into a Python AST with marker calls."""
     if not text.strip():
         raise UnsupportedError("empty spec expression", line)
+    if "__lsc_" in text:
+        raise UnsupportedError("names starting with '__lsc_' are reserved", line)
     source = _region(_tokens(text, line), line)
     try:
         tree = ast.parse(source, mode="eval")
@@ -213,7 +220,7 @@ class _ToPython(ast.NodeTransformer):
         self.generic_visit(node)
         if isinstance(node.func, ast.Name) and node.func.id == IMPLIES:
             a, b = node.args
-            return ast.BoolOp(ast.Or(), [ast.UnaryOp(ast.Not(), a), b])
+            return ast.BoolOp(ast.Or(), [ast.UnaryOp(ast.Not(), a), _as_bool(b)])
         if isinstance(node.func, ast.Name) and node.func.id == IFF:
             a, b = node.args
             return ast.Compare(_as_bool(a), [ast.Eq()], [_as_bool(b)])

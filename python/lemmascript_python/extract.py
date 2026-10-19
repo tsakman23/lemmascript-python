@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,17 @@ from lemmascript_python.annotations import (
 from lemmascript_python.errors import UnsupportedError
 from lemmascript_python.lower import FunctionLowerer, Signature, always_exits, binding_counts
 from lemmascript_python.pytypes import from_annotation
+from lemmascript_python.reserved import reserved_reason
 
 RAW_IR_FORMAT = "lemmascript-raw-ir"
 RAW_IR_VERSION = 1
 
 #: Modules whose imports carry no runtime behaviour the model must know about.
 ALLOWED_IMPORTS = frozenset({"__future__", "typing", "typing_extensions"})
+FUTURE_NAMES = frozenset({"annotations"})
+#: Names usable only in annotations; none of them is callable in the subset.
+TYPING_NAMES = frozenset({"Final", "List", "Optional", "Union", "Literal", "NamedTuple", "TypedDict",
+                          "TypeAlias", "Dict", "Set", "Tuple", "FrozenSet", "Sequence", "Mapping"})
 
 #: File-overridable lsc options (tools/src/config.ts), with their allowed values.
 FILE_OPTIONS: dict[str, tuple[str, ...]] = {
@@ -73,8 +79,9 @@ class _Module:
                 continue
             a.claimed = True
             if a.keyword == "backend":
-                if a.text not in ("dafny", "lean"):
-                    raise UnsupportedError(f"'#@ backend {a.text}': expected dafny or lean", a.line, a.col)
+                if a.text != "dafny":
+                    raise UnsupportedError(f"'#@ backend {a.text}': the Python frontend supports only the Dafny "
+                                           "backend", a.line, a.col)
                 backend = a.text
             else:
                 key, _, value = a.text.partition(" ")
@@ -138,20 +145,74 @@ class _Module:
             raise _err(f"'{fn.name}' needs a return type annotation", fn)
         return Signature(fn.name, params, from_annotation(fn.returns))
 
+    def check_import(self, s: ast.Import | ast.ImportFrom, after_def: bool) -> None:
+        """Imports exist only for annotations, and must not bind a name verified code could call."""
+        if after_def:
+            raise _err("imports must come before the first function", s)
+        if any(a.asname for a in s.names):
+            raise _err("import aliases ('as') are not supported", s)
+        if isinstance(s, ast.Import):
+            for alias in s.names:
+                if alias.name not in ALLOWED_IMPORTS:
+                    raise _err(f"import of '{alias.name}' is not supported", s)
+            return
+        module = s.module or ""
+        if s.level or module not in ALLOWED_IMPORTS:
+            raise _err(f"import of '{'.' * s.level}{module}' is not supported", s)
+        for alias in s.names:
+            if alias.name == "*":
+                raise _err(f"'from {module} import *' is not supported", s)
+            allowed = FUTURE_NAMES if module == "__future__" else TYPING_NAMES
+            if alias.name not in allowed:
+                raise _err(f"'{alias.name}' cannot be imported (only annotation names: "
+                           f"{', '.join(sorted(allowed))})", s)
+
+    def check_main_guard(self, guard: ast.If, functions: set[str]) -> None:
+        """The `__main__` block runs only as a script, but it shares the module namespace:
+        it must not rebind a name verified code calls."""
+        for n in ast.walk(guard):
+            if n is guard:
+                continue
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom,
+                              ast.Global, ast.Nonlocal, ast.Delete)):
+                raise _err("the '__main__' block may not bind or rebind names (definitions, imports, "
+                           "global, del); it shares the namespace verified code runs in", n)
+            targets: list[ast.expr] = []
+            if isinstance(n, ast.Assign):
+                targets = list(n.targets)
+            elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor, ast.NamedExpr)):
+                targets = [n.target]
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                targets = [i.optional_vars for i in n.items if i.optional_vars is not None]
+            for t in targets:
+                for name in ast.walk(t):
+                    if isinstance(name, ast.Name) and (name.id in functions or hasattr(builtins, name.id)):
+                        raise _err(f"the '__main__' block may not bind '{name.id}': verified code "
+                                   "calls that name", n)
+
+    def check_names(self) -> None:
+        for n in ast.walk(self.tree):
+            name = (n.id if isinstance(n, ast.Name) else n.arg if isinstance(n, ast.arg)
+                    else n.name if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else None)
+            if name is not None:
+                reason = reserved_reason(name)
+                if reason is not None:
+                    raise _err(reason, n)
+
     def extract(self) -> dict[str, Any]:
         directives = self.directives()
+        self.check_names()
         defs: list[ast.FunctionDef] = []
+        guards: list[ast.If] = []
         for s in self.tree.body:
-            if _is_docstring(s) or _is_main_guard(s):
+            if _is_docstring(s):
                 continue
-            if isinstance(s, ast.Import):
-                for alias in s.names:
-                    if alias.name.split(".")[0] not in ALLOWED_IMPORTS:
-                        raise _err(f"import of '{alias.name}' is not supported", s)
+            if _is_main_guard(s):
+                assert isinstance(s, ast.If)
+                guards.append(s)
                 continue
-            if isinstance(s, ast.ImportFrom):
-                if (s.module or "").split(".")[0] not in ALLOWED_IMPORTS or s.level:
-                    raise _err(f"import of '{'.' * s.level}{s.module or ''}' is not supported", s)
+            if isinstance(s, (ast.Import, ast.ImportFrom)):
+                self.check_import(s, bool(defs))
                 continue
             if isinstance(s, ast.AsyncFunctionDef):
                 raise _err("async functions are not supported", s)
@@ -160,12 +221,16 @@ class _Module:
                     raise _err("decorators are not supported", s.decorator_list[0])
                 if s.type_params:
                     raise _err("generic functions are not supported", s)
+                if any(d.name == s.name for d in defs):
+                    raise _err(f"'{s.name}' is defined twice", s)
                 defs.append(s)
                 continue
             if isinstance(s, ast.ClassDef):
                 raise _err("classes are not supported yet", s)
             raise _err("top-level statement is not supported (only functions, imports and docstrings)", s)
 
+        for g in guards:
+            self.check_main_guard(g, {d.name for d in defs})
         heads = {fn.name: self.head_annotations(fn) for fn in defs}
         self.check_head_misplacements(defs)
         sigs = {fn.name: self.signature(fn) for fn in defs}
@@ -240,7 +305,8 @@ class _Module:
                  sigs: dict[str, Signature], verify_mode: bool) -> dict[str, Any]:
         if any(p == "result" for p, _ in sig.params):
             raise _err("a parameter named 'result' clashes with the return value in '#@ ensures'; rename it", fn)
-        low = FunctionLowerer(sig, sigs, verify_mode, binding_counts(fn), self.annotations, self.identifiers())
+        low = FunctionLowerer(sig, sigs, verify_mode, binding_counts(fn), self.annotations, self.identifiers(),
+                              local_names=_bound_names(fn) | {p for p, _ in sig.params})
         requires, ensures, contract = [], [], []
         decreases = None
         pure = False
@@ -253,6 +319,8 @@ class _Module:
             elif a.keyword == "decreases":
                 decreases = low.spec_value(a.text, a.line)
             elif a.keyword == "pure":
+                if any(isinstance(n, (ast.Raise, ast.Assert)) for n in ast.walk(fn)):
+                    raise UnsupportedError("'#@ pure' is not supported on a function that can raise", a.line, a.col)
                 pure = True
             elif a.keyword == "contract":
                 contract.append(a.text)
@@ -260,6 +328,12 @@ class _Module:
                 parts = a.text.split()
                 if len(parts) != 2 or parts[1] not in ("nat", "int"):
                     raise UnsupportedError("'#@ type' is written '#@ type <name> nat'", a.line, a.col)
+                if parts[0] == "result":
+                    raise UnsupportedError("'#@ type result' is not supported; state the bound in '#@ ensures'",
+                                           a.line, a.col)
+                if parts[0] not in {p for p, _ in sig.params} | set(_bound_names(fn)):
+                    raise UnsupportedError(f"'#@ type {parts[0]}': no parameter or local named '{parts[0]}'",
+                                           a.line, a.col)
                 type_annotations.append({"name": parts[0], "type": parts[1]})
         body_stmts = [s for s in fn.body if not _is_docstring(s)] if fn.body else []
         body = low.body(body_stmts, fn.lineno, self.extent_end(fn) + 1)
@@ -309,3 +383,17 @@ def extract_source(source: str, filename: str = "<string>") -> dict[str, Any]:
 def extract_file(path: str) -> dict[str, Any]:
     p = Path(path)
     return extract_source(p.read_text(encoding="utf-8"), p.name)
+
+
+def _bound_names(fn: ast.FunctionDef) -> set[str]:
+    """Every name a function binds anywhere (Python makes them local to the whole function)."""
+    out: set[str] = set()
+    for n in ast.walk(fn):
+        targets: list[ast.expr] = []
+        if isinstance(n, ast.Assign):
+            targets = list(n.targets)
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor, ast.NamedExpr)):
+            targets = [n.target]
+        for t in targets:
+            out.update(x.id for x in ast.walk(t) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store))
+    return out

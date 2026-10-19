@@ -94,6 +94,8 @@ A differential harness backs this up. It runs the original Python against the co
 
 **Scoping.** Python variables are function-scoped, but the model's are block-scoped. So a variable must be first assigned at a level that encloses every use. For example, write `y = 0` before an `if` that sets `y` in each branch.
 
+**Calls inside `and` / `or` / conditional expressions.** The engine may evaluate a call to a loop-bearing function before the short-circuit test, even though Python would skip it. This never makes a proof wrong, but it can make one fail spuriously, with a precondition or termination error for a call Python never makes. Bind the call to a variable inside an `if` instead.
+
 **Must return.** A function with a non-`None` return type must return or raise on every path. Python would silently return `None`, which the model could not represent.
 
 **Aliasing (from M2).** Python lists, dicts and sets are shared references, while the model treats them as values. The following keep any sharing invisible:
@@ -127,6 +129,9 @@ Specs are parsed with Python's own parser and lowered by the same code as functi
 ## Trust assumptions
 
 These assumptions are stated explicitly rather than modelled:
+
+- **Recursion depth.** Python stops deep recursion with `RecursionError` (by default after about 1000 nested calls). The model has no such limit, so a proof about a recursive function holds for inputs within Python's recursion limit.
+- **No monkeypatching.** Verified code calls the module's functions as defined in the file. Replacing them at runtime from other code (`mod.f = ...`, `setattr`, `globals()`) is outside the model. Within the file, the frontend rejects every way to rebind them: import aliases, `import *`, local assignments to function or builtin names, and bindings in the `__main__` block.
 
 - `#@ type p nat` on a parameter is a precondition: the proof covers only `p >= 0`.
 - From M4, verified code assumes no string contains a lone surrogate.
